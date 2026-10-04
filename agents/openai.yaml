@@ -1,0 +1,4 @@
+interface:
+  display_name: "通用人物设定图制作"
+  short_description: "从参考提取角色特征，控制提示词变更，逐项验收四张设定图并检查修改劣化"
+  default_prompt: "使用 $character-reference-sheet 根据我的参考素材提取角色特征，制作并逐项验收人物设定图。"

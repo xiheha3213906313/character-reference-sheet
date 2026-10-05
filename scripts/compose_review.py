@@ -210,10 +210,12 @@ def preview(args, font_path):
             raise ValueError('总览文件名须为角色名称_描述性造型后缀.png')
         if output.suffix.lower() != ".png" or output in used:
             raise ValueError("每套preview_file须为独立PNG路径")
-        if any(output.is_relative_to(other) or output.with_suffix(".png.json").is_relative_to(other) for other in folders):
-            raise ValueError("预览及旁录不能放在任一四张成图文件夹中")
+        if any(output.is_relative_to(other) and other != folder for other in folders):
+            raise ValueError('总览不能放在其他套图目录中')
         used.add(output)
         inputs = {role: within(folder, outfit["files"][role]) for role in DISPLAY_ORDER}
+        if output in set(inputs.values()) or output.with_suffix('.png.json') in set(inputs.values()):
+            raise ValueError('总览或旁录不能覆盖当前单图')
         plans.append((outfit, output, inputs))
     outputs = []
     for outfit, output, inputs in plans:

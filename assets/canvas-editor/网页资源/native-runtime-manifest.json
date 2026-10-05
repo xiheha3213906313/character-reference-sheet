@@ -1,0 +1,186 @@
+{
+  "version": "1.30.0",
+  "platform": "win32",
+  "arch": "x64",
+  "packages": [
+    {
+      "name": "onnxruntime-node",
+      "url": "https://registry.npmjs.org/onnxruntime-node/-/onnxruntime-node-1.30.0.tgz",
+      "integrity": "sha512-twhs1C2C/BFkz1yc5OY0KIU2GUq6DURO7hD4bx5Q2Qy3nAMJwRXW8xU3NVczE29VA9lolLOYepoD8fjTGOfIqw==",
+      "files": [
+        {
+          "path": "package.json",
+          "bytes": 1593,
+          "sha256": "0871cd56ac2b9c9dfc834c7eabba819e5d4f966f005388515abb3402b14e0874"
+        },
+        {
+          "path": "dist/backend.js",
+          "bytes": 6289,
+          "sha256": "a79e8019e7276a282987023f9d38d41063a99e563e5e1a6f38a73a7d39ea83ab"
+        },
+        {
+          "path": "dist/binding.js",
+          "bytes": 1590,
+          "sha256": "2a85ac5de943c7222aae5ca2897f52d73891f528d4295b701fab077470c668c0"
+        },
+        {
+          "path": "dist/index.js",
+          "bytes": 1602,
+          "sha256": "019eb02133b94b1f7fdf2d89eb93b590ce1288d271f7b280647fb3978e6391fa"
+        },
+        {
+          "path": "dist/version.js",
+          "bytes": 361,
+          "sha256": "0a1a7f532f4455ead0678966815c3114730150aa4368ebb5ebd9727425e9003b"
+        },
+        {
+          "path": "bin/napi-v6/win32/x64/DirectML.dll",
+          "bytes": 18527584,
+          "sha256": "234e8898778cdec88d3cb0539508273494082812c968699f3de665a018971625"
+        },
+        {
+          "path": "bin/napi-v6/win32/x64/dxcompiler.dll",
+          "bytes": 17986360,
+          "sha256": "593d42df78c7f9cbd97c1374af107cfe20985759f98b77afc1448fe41ee3cc76"
+        },
+        {
+          "path": "bin/napi-v6/win32/x64/dxil.dll",
+          "bytes": 1508664,
+          "sha256": "cf9a3981263f8ec30c9905d136eeaf4b4573209c602198671b958ec86905dea8"
+        },
+        {
+          "path": "bin/napi-v6/win32/x64/onnxruntime.dll",
+          "bytes": 28754232,
+          "sha256": "508c362f5673483dd3a086379c392795b2e42d10d5e6f3f90ebd7ac21c97af67"
+        },
+        {
+          "path": "bin/napi-v6/win32/x64/onnxruntime_binding.node",
+          "bytes": 298848,
+          "sha256": "ddd428464069b84414d34ec1796c7c2a69c33a976e4b0390692629e394f92fa1"
+        }
+      ]
+    },
+    {
+      "name": "onnxruntime-common",
+      "url": "https://registry.npmjs.org/onnxruntime-common/-/onnxruntime-common-1.30.0.tgz",
+      "integrity": "sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA==",
+      "files": [
+        {
+          "path": "package.json",
+          "bytes": 977,
+          "sha256": "4266741a80346e25820ccc494fbffb95e2f652b6dfb5585025be44df3b0d6722"
+        },
+        {
+          "path": "dist/cjs/backend-impl.js",
+          "bytes": 5608,
+          "sha256": "3d25321895995f7e9480570b9a88f121049adf152e1829d0ecb11218da02d487"
+        },
+        {
+          "path": "dist/cjs/backend.js",
+          "bytes": 433,
+          "sha256": "325aaee7a2649ea27629666f3ca01c0d80b9751e704ce502e43a8352390749b4"
+        },
+        {
+          "path": "dist/cjs/env-impl.js",
+          "bytes": 969,
+          "sha256": "35cd8cac33973538eab471b68622c86c35a6896f4307d1a74c9ca0eda7abbac6"
+        },
+        {
+          "path": "dist/cjs/env.js",
+          "bytes": 366,
+          "sha256": "22c7647f8ca1c1b83b437a92b95fee1457fcb72866fa029616b8f146dc609be8"
+        },
+        {
+          "path": "dist/cjs/index.js",
+          "bytes": 1955,
+          "sha256": "d7dd6cc9790e87299099fcd1b0ccb4969c01591d7eec0383a1c64dbea133dd1a"
+        },
+        {
+          "path": "dist/cjs/inference-session-impl.js",
+          "bytes": 8996,
+          "sha256": "88d90723a169297855ad3b564b134c6b685b2661316c81f71fc80da1e203bae0"
+        },
+        {
+          "path": "dist/cjs/inference-session.js",
+          "bytes": 467,
+          "sha256": "458be26f316c5068d32a56ddbc30ca0aa687c636e079b3d161a69f0f14a683f1"
+        },
+        {
+          "path": "dist/cjs/onnx-model.js",
+          "bytes": 211,
+          "sha256": "667f5fdac4b6df25e17f8a864d4dc619507f541f9fa0aafb6d3572fcca1e25e5"
+        },
+        {
+          "path": "dist/cjs/onnx-value.js",
+          "bytes": 211,
+          "sha256": "8446854766f4955ce438a7338216f49223767ecc508bb502b73a3dc1a1f1998e"
+        },
+        {
+          "path": "dist/cjs/tensor-conversion-impl.js",
+          "bytes": 8067,
+          "sha256": "9815e72c0bb91896035de93b3113a2256a1a998bc53c7b5e6bf5fb4e93714766"
+        },
+        {
+          "path": "dist/cjs/tensor-conversion.js",
+          "bytes": 218,
+          "sha256": "28cc462d4a9ea556ecc86c0e6d16a51d61b58d5bc5b4b7b48976b14bc8035bdc"
+        },
+        {
+          "path": "dist/cjs/tensor-factory-impl.js",
+          "bytes": 11656,
+          "sha256": "a3204838a2c14416e4e61c968dc17c663ab3c9b8b2c4a8b7f2a1c5b06e3e5173"
+        },
+        {
+          "path": "dist/cjs/tensor-factory.js",
+          "bytes": 215,
+          "sha256": "13b8d735350b828a49bda8aeec50b1dac888cf42268006efc4312f50a88b6906"
+        },
+        {
+          "path": "dist/cjs/tensor-impl-type-mapping.js",
+          "bytes": 2995,
+          "sha256": "333110edbbffdb7575ea340cb341bcaf691862d6594a649db28097f7d8cb19b7"
+        },
+        {
+          "path": "dist/cjs/tensor-impl.js",
+          "bytes": 16458,
+          "sha256": "11645352ba5d08971344717d3339f86aac560f84f29229b2ebe07f1ec8aa8905"
+        },
+        {
+          "path": "dist/cjs/tensor-utils-impl.js",
+          "bytes": 2213,
+          "sha256": "e7b1db989d33d54bdd1807b080a0989ff0b10d5f7dd8c93b92bbf293103aa4d5"
+        },
+        {
+          "path": "dist/cjs/tensor-utils.js",
+          "bytes": 213,
+          "sha256": "d3f577e90dc2257c72ac728e5e6355c34af0342d971158d9f22b69d22aa97b8d"
+        },
+        {
+          "path": "dist/cjs/tensor.js",
+          "bytes": 393,
+          "sha256": "9097114de356750f36f28776fa6ccd08d13694f0f9aac9e7669c30b6c43153f7"
+        },
+        {
+          "path": "dist/cjs/trace.js",
+          "bytes": 2496,
+          "sha256": "faecd0df94998d786e2085d56aa6003449f1ac3b35c350e0d2762498604e5d72"
+        },
+        {
+          "path": "dist/cjs/type-helper.js",
+          "bytes": 212,
+          "sha256": "7f786da8d2a611ad751c70a74edf4d9acfccd26be8e5c6b1cb730f982892bf32"
+        },
+        {
+          "path": "dist/cjs/version.js",
+          "bytes": 361,
+          "sha256": "0a1a7f532f4455ead0678966815c3114730150aa4368ebb5ebd9727425e9003b"
+        },
+        {
+          "path": "dist/cjs/package.json",
+          "bytes": 20,
+          "sha256": "091a04fa67c7907b98e106fcff8b964e13129754fce72d24f3025b97c4887fa3"
+        }
+      ]
+    }
+  ]
+}

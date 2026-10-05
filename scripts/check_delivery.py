@@ -1,5 +1,6 @@
 """Read-only full-delivery record validation; --files-only is an explicit reduced mode."""
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -59,6 +60,69 @@ def png_size(path):
     return w, h
 
 
+def check_editor(folder, files):
+    """Check released bytes and local image data; never approves image quality."""
+    release = json.loads(within(folder, '制作记录/网页释放.json').read_text(encoding='utf-8-sig'))
+    required = {'editor.html', 'start.cmd', '使用说明.md', '网页资源/release.json',
+                '网页资源/hub.mjs', '网页资源/launch.ps1', '网页资源/native-runtime.mjs',
+                '网页资源/native-runtime-manifest.json', '网页资源/native-worker.mjs',
+                '网页资源/native-matting.mjs'}
+    entries = release.get('files', [])
+    if (release.get('schemaVersion') != 1 or len(entries) != len(required)
+            or {e.get('path') for e in entries} != required):
+        raise ValueError('网页释放记录缺失或文件集合不完整')
+    for entry in entries:
+        data = within(folder, entry['path']).read_bytes()
+        if len(data) != entry.get('size') or hashlib.sha256(data).hexdigest() != entry.get('sha256'):
+            raise ValueError('网页资源变更或缺失：' + entry['path'])
+    bundle = json.loads(within(folder, '网页资源/release.json').read_text(encoding='utf-8-sig'))
+    if bundle.get('uiRevision') != release.get('uiRevision'):
+        raise ValueError('网页版本与释放记录不符')
+    for entry in bundle.get('files', []):
+        data = within(folder, entry['path']).read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
+            raise ValueError('网页文件不是所记录的可释放模板')
+    manifest = json.loads(within(folder, '画布清单.json').read_text(encoding='utf-8-sig'))
+    script = within(folder, '交付索引.js').read_text(encoding='utf-8-sig').strip()
+    prefix = 'window.CHARACTER_DELIVERY='
+    if not script.startswith(prefix) or not script.endswith(';'):
+        raise ValueError('交付索引格式不符')
+    index = json.loads(script[len(prefix):-1])
+    if (index.get('candidates') != manifest.get('candidates')
+            or [{k: v for k, v in c.items() if k != 'data'} for c in index.get('current', [])]
+            != manifest.get('current')):
+        raise ValueError('本地网页索引与候选账本不一致')
+    role_map = {'head': 'head', 'front': 'front', 'left': 'side', 'back': 'back'}
+    current = {c['view']: c for c in index.get('current', [])}
+    if len(index.get('current', [])) != 4 or set(current) != set(role_map.values()):
+        raise ValueError('网页索引缺少当前四视图')
+    for role, web_role in role_map.items():
+        entry = current[web_role]
+        data = within(folder, files[role]).read_bytes()
+        if entry.get('path') != files[role] or entry.get('sha256') != hashlib.sha256(data).hexdigest():
+            raise ValueError('网页当前图不是已声明的交付版本：' + role)
+        if entry.get('data') != 'data:image/png;base64,' + base64.b64encode(data).decode('ascii'):
+            raise ValueError('网页内嵌当前图与PNG不一致：' + role)
+    candidates = manifest.get('candidates', [])
+    archived_paths = set()
+    for entry in candidates:
+        if not str(entry.get('path', '')).startswith('候选/') or entry.get('view') not in role_map.values():
+            raise ValueError('候选账本路径或视图无效')
+        data = within(folder, entry['path']).read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
+            raise ValueError('候选PNG与账本不符：' + entry['path'])
+        payload = json.dumps({'id': entry['id'], 'data': 'data:image/png;base64,' + base64.b64encode(data).decode('ascii')}, ensure_ascii=False, separators=(',', ':'))
+        expected = 'window.dispatchEvent(new CustomEvent("character-image",{detail:' + payload + '}));'
+        if within(folder, entry['dataScript']).read_text(encoding='utf-8-sig').strip() != expected:
+            raise ValueError('候选加载脚本缺失或内容不符：' + entry['path'])
+        archived_paths.add(entry['path'])
+    disk_paths = {'候选/' + p.name for p in within(folder, '候选').iterdir()
+                  if p.is_file() and re.fullmatch(r'\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png', p.name)}
+    if disk_paths != archived_paths:
+        raise ValueError('候选目录存在未登记或遗漏图片')
+    return {'folder': str(folder), 'ui_revision': release.get('uiRevision'), 'candidate_count': len(candidates)}
+
+
 def check(manifest, root, force_preview=False, files_only=False):
     from PIL import Image, ImageChops
     from overview_layout import metrics as layout_metrics, plan as plan_layout, settings_from_layout, overlap_within_limit, local_rows, placed_rows, separated_x
@@ -74,9 +138,12 @@ def check(manifest, root, force_preview=False, files_only=False):
     require_preview = not files_only or force_preview or manifest.get("require_preview", False)
     if type(manifest.get("require_visual_review", False)) is not bool:
         raise ValueError("require_visual_review须为布尔值")
+    if type(manifest.get('require_editor', not files_only)) is not bool:
+        raise ValueError('require_editor须为布尔值')
+    require_editor = manifest.get('require_editor', not files_only)
     require_review = not files_only
     errors, checked, descriptions, seen_paths, seen_folders = [], [], [], set(), set()
-    preview_tasks, previews, folders = [], [], []
+    preview_tasks, previews, folders, editors = [], [], [], []
     for index, outfit in enumerate(outfits, 1):
         if not isinstance(outfit, dict):
             errors.append(f"套图{index}不是对象")
@@ -115,9 +182,10 @@ def check(manifest, root, force_preview=False, files_only=False):
                 descriptions.append({"outfit": name, "file": str(description), "sha256": hashlib.sha256(description.read_bytes()).hexdigest()})
         except (OSError, ValueError, TypeError, ImportError) as exc:
             errors.append(f"{name}/description：{exc}")
-        pngs = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() == ".png"]
+        declared_preview = within(root, outfit['preview_file']) if outfit.get('preview_file') else None
+        pngs = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == '.png' and p.resolve() != declared_preview]
         if len(pngs) != 4:
-            errors.append(f"{name}：文件夹有{len(pngs)}张PNG，要求恰好四张")
+            errors.append(f"{name}：目录外层除声明总览外有{len(pngs)}张PNG，要求四张当前图")
         expected = set()
         for role in ROLES:
             try:
@@ -155,14 +223,21 @@ def check(manifest, root, force_preview=False, files_only=False):
         actual = {os.path.normcase(str(p.resolve())) for p in pngs}
         if actual != expected:
             errors.append(f"{name}：文件夹PNG与四角色清单不一致")
+        if require_editor:
+            try:
+                editors.append(check_editor(folder, files))
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                errors.append(f'{name}/editor：{exc}')
         if require_preview or outfit.get("preview_file") is not None:
             preview_tasks.append((name, outfit, folder))
     seen_previews = set()
     for name, outfit, folder in preview_tasks:
         try:
             path = within(root, outfit.get("preview_file"))
-            if any(path.is_relative_to(other) for other in folders):
-                raise ValueError("预览不能放在任一四张成图文件夹中")
+            if any(path.is_relative_to(other) and other != folder for other in folders):
+                raise ValueError('总览不能放在其他套图目录中')
+            if path in {within(folder, p) for p in outfit['files'].values()}:
+                raise ValueError('总览不能覆盖当前单图')
             key = os.path.normcase(str(path))
             if key in seen_previews:
                 raise ValueError("不同套图不能共用同一预览")
@@ -337,6 +412,7 @@ def check(manifest, root, force_preview=False, files_only=False):
             "outfit_count": len(outfits), "png_count": len(checked), "description_count": len(descriptions),
             "preview_count": len(previews), "errors": errors, "review_errors": review_errors,
             "transparent_count":len(transparent_images), "transparent_images":transparent_images,
+            "editor_count": len(editors), "editors": editors,
             "images": checked, "descriptions": descriptions, "previews": previews, "reviews": reviews}
 
 

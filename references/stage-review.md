@@ -44,14 +44,14 @@
 {
   "brief_file":"制作记录/验收目标.json","brief_sha256":"实际哈希",
   "stages":{"head":{
-    "image":"制作记录/候选/head_G0.png","sha256":"实际哈希",
+    "image":"候选/000001_特写.png","sha256":"实际哈希",
     "decision":"unreviewed","dependencies":{},
     "checks":[{
       "id":"本任务身份关系","result":"pending",
       "reference_observation":"实际原始证据观察",
       "candidate_observation":"实际候选观察",
       "comparison_basis":"实际尺度锚点坐标/间距、计算倍率、显示复核与可比范围；原生质量单看另注明",
-      "evidence":[{"file":"验收对照/身份对照.png","sha256":"实际哈希",
+      "evidence":[{"file":"制作记录/对照/身份对照.png","sha256":"实际哈希",
                    "candidate_sha256":"当前候选哈希","purpose":"reference_compare","viewed":true}]
     }]
   }}
@@ -60,7 +60,7 @@
 
 按 [输入细节逐项对照](visual-verification.md#输入细节逐项对照) 实际打开每组对应部位，再写该项观察与结论；缺对照、未看或看不清的关键细节不能预填通过。特写构图看候选整幅，按 [位置与占比](presentation.md#特写位置与占比) 记录头部主体性、身体占比及是否明显偏下；面部合理偏移可通过，不要求中心测量。有用户指定镜头样例时可补整幅并排，不能仅用重新居中的脸部裁切。合理不可见的事实注明范围与其他视图证据；确定细节错误时撤销该版本及受影响下游的批准。
 
-`viewed:true` 是执行者对实际打开图像的记录，脚本不证明这件事发生过，更不判定观察正确。透明阶段用 `background_policy:{"mode":"transparent","alpha_source":"model或tool_extraction或python_matting"}`；透明空白样本写 `empty_background_samples:[{"xy":[x,y],"alpha":0,"confirmed_empty":true}]`，背景证据包含实际查看的深浅底PNG，分别标 `background:"dark"` / `"light"`。Python抠像另用 `provenance_file` 指向与当前输出哈希匹配的真实抠像旁录，边缘/主体/材料仍须看图。
+`viewed:true` 是执行者对实际打开图像的记录，脚本不证明这件事发生过，更不判定观察正确。透明阶段用 `background_policy:{"mode":"transparent","alpha_source":"model或tool_extraction或python_matting"}`；透明空白样本写 `empty_background_samples:[{"xy":[x,y],"alpha":0,"confirmed_empty":true}]`，背景证据包含实际查看的深浅底PNG，分别标 `background:"dark"` / `"light"`。本地抠像另用 `provenance_file` 指向与当前输出哈希匹配的真实抠像旁录，边缘/主体/材料仍须看图。
 
 白底阶段背景检查另写 `empty_background_samples:[{"xy":[x,y],"rgb":[255,255,255],"confirmed_empty":true}]`，RGB填真实源PNG空背景采样，不能采到主体或抄提示词。用户另要求严格纯白时写 `background_policy:{"mode":"exact_white"}`；实际不支持Alpha或本次透明输出不可用的RGB降级阶段可写 `{"mode":"near_white_rgb_fallback","alpha_limitation":"input或output或both","reason":"实际能力限制依据"}` 并在底稿标明近白目标。须视觉接近中性白；不能为让失败通过虚构能力限制。
 

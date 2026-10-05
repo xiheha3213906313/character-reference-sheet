@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "uiRevision": 16,
+  "layoutVersion": 1,
+  "files": [
+    {
+      "path": "editor.html",
+      "size": 147595,
+      "sha256": "1e6b9b4bd2c9aaeafbb61981d92a9ce7f5d1bd84ed19a5c814be0b019f2a808e"
+    },
+    {
+      "path": "start.cmd",
+      "size": 349,
+      "sha256": "f76a1a26b0e73034d49fee74a81ab2942a3db41b0eb22957f44237ff4e6bc18d"
+    },
+    {
+      "path": "使用说明.md",
+      "size": 1928,
+      "sha256": "2ed15e1bfa805359b974a5cff05cb1f558bfeefc7a82af52a7266d4b3aa8cd3f"
+    },
+    {
+      "path": "网页资源/hub.mjs",
+      "size": 19406,
+      "sha256": "4e7dbbf6c587ebef405ce1e9451ebb1024e6d53cf1d453f8380379d96875992c"
+    },
+    {
+      "path": "网页资源/launch.ps1",
+      "size": 1135,
+      "sha256": "f81960a911dd503ba8a93879c378ae942f00181e975e9a09ce55cf1eb08954d1"
+    },
+    {
+      "path": "网页资源/native-runtime.mjs",
+      "size": 4155,
+      "sha256": "f59f566815de08ef643451d1926182b32547680728f9999eebe78fc75ddbcfd7"
+    },
+    {
+      "path": "网页资源/native-runtime-manifest.json",
+      "size": 6564,
+      "sha256": "749447c81a99ccbeefc2955c30394046f54661201d8d65e47ed02d8882fe764c"
+    },
+    {
+      "path": "网页资源/native-worker.mjs",
+      "size": 1938,
+      "sha256": "59fc963fd4ace62ee0584be7c772232feb604d302a98b94f80ea0097327928fb"
+    },
+    {
+      "path": "网页资源/native-matting.mjs",
+      "size": 1677,
+      "sha256": "4ed27669eb04cd22be654bc1ea483989ae430175d7bda2d92d63a8ae7e29ece1"
+    }
+  ]
+}

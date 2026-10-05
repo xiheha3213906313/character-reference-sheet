@@ -36,6 +36,46 @@ def within(base, relative):
     return target
 
 
+def check_delivery_location(manifest, root, files_only=False):
+    """Check the actual destination, not a workspace copy labelled as delivered."""
+    if files_only:
+        return None
+    root = root.resolve()
+    if not root.is_dir():
+        raise ValueError("交付根目录不存在")
+    override = manifest.get('delivery_directory_override_reason', '')
+    if not isinstance(override, str):
+        raise ValueError("delivery_directory_override_reason须为用户要求的文本")
+    if override.strip():
+        return {'root': str(root), 'mode': 'user_override', 'reason': override.strip()}
+    material = manifest.get('material_directory')
+    if not isinstance(material, str) or not material.strip() or not Path(material).is_absolute():
+        raise ValueError("完整交付须登记素材目录的实际绝对路径material_directory")
+    material = Path(material).resolve()
+    if not material.is_dir():
+        raise ValueError("登记的素材目录不存在")
+    try:
+        relative = root.relative_to(material)
+    except ValueError:
+        raise ValueError("最终交付目录不在素材目录内；工作区暂存检查请用--files-only")
+    if not relative.parts:
+        raise ValueError("须在素材目录内新建交付子目录，保留原始素材")
+    return {'root': str(root), 'mode': 'material_directory', 'material_directory': str(material)}
+
+
+def check_description(folder, outfit, required=True):
+    if not required and not outfit.get('description_file'):
+        return None
+    description = within(folder, outfit.get('description_file', '角色描述.md'))
+    if not description.is_file():
+        raise ValueError("角色描述文件不存在；每套默认须交付角色描述.md")
+    if description.suffix.lower() != '.md':
+        raise ValueError("角色描述须为Markdown文档")
+    if not description.read_text(encoding='utf-8-sig').strip():
+        raise ValueError("角色描述文件为空")
+    return {'file': str(description), 'sha256': hashlib.sha256(description.read_bytes()).hexdigest()}
+
+
 def ratio(value):
     try:
         parts = value.split(":")
@@ -63,7 +103,7 @@ def png_size(path):
 def check_editor(folder, files):
     """Check released bytes and local image data; never approves image quality."""
     release = json.loads(within(folder, '制作记录/网页释放.json').read_text(encoding='utf-8-sig'))
-    required = {'editor.html', 'start.cmd', '使用说明.md', '网页资源/release.json',
+    required = {'编辑画布.html', '网页资源/后端服务.cmd', '使用说明.md', '网页资源/release.json',
                 '网页资源/hub.mjs', '网页资源/launch.ps1', '网页资源/native-runtime.mjs',
                 '网页资源/native-runtime-manifest.json', '网页资源/native-worker.mjs',
                 '网页资源/native-matting.mjs'}
@@ -82,8 +122,8 @@ def check_editor(folder, files):
         data = within(folder, entry['path']).read_bytes()
         if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
             raise ValueError('网页文件不是所记录的可释放模板')
-    manifest = json.loads(within(folder, '画布清单.json').read_text(encoding='utf-8-sig'))
-    script = within(folder, '交付索引.js').read_text(encoding='utf-8-sig').strip()
+    manifest = json.loads(within(folder, '网页资源/画布清单.json').read_text(encoding='utf-8-sig'))
+    script = within(folder, '网页资源/交付索引.js').read_text(encoding='utf-8-sig').strip()
     prefix = 'window.CHARACTER_DELIVERY='
     if not script.startswith(prefix) or not script.endswith(';'):
         raise ValueError('交付索引格式不符')
@@ -142,8 +182,20 @@ def check(manifest, root, force_preview=False, files_only=False):
         raise ValueError('require_editor须为布尔值')
     require_editor = manifest.get('require_editor', not files_only)
     require_review = not files_only
+    require_description = manifest.get('require_description', not files_only)
+    if type(require_description) is not bool:
+        raise ValueError('require_description须为布尔值')
+    if not files_only and not require_description:
+        reason = manifest.get('description_omission_reason')
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('省略角色描述须记录用户明确要求description_omission_reason')
     errors, checked, descriptions, seen_paths, seen_folders = [], [], [], set(), set()
     preview_tasks, previews, folders, editors = [], [], [], []
+    delivery_location = None
+    try:
+        delivery_location = check_delivery_location(manifest, root, files_only)
+    except (OSError, ValueError, TypeError) as exc:
+        errors.append(f'delivery_location：{exc}')
     for index, outfit in enumerate(outfits, 1):
         if not isinstance(outfit, dict):
             errors.append(f"套图{index}不是对象")
@@ -169,17 +221,9 @@ def check(manifest, root, force_preview=False, files_only=False):
             errors.append(f"{name}：{exc}")
             continue
         try:
-            description = within(folder, outfit["description_file"]) if outfit.get('description_file') else None
-            if description is None:
-                pass
-            elif not description.is_file():
-                raise ValueError("角色描述文件不存在")
-            elif description.suffix.lower() not in (".md", ".txt"):
-                raise ValueError("描述检查支持Markdown或TXT；其他格式需等价人工检查")
-            elif not description.read_text(encoding="utf-8-sig").strip():
-                raise ValueError("角色描述文件为空")
+            description = check_description(folder, outfit, require_description)
             if description is not None:
-                descriptions.append({"outfit": name, "file": str(description), "sha256": hashlib.sha256(description.read_bytes()).hexdigest()})
+                descriptions.append({'outfit': name, **description})
         except (OSError, ValueError, TypeError, ImportError) as exc:
             errors.append(f"{name}/description：{exc}")
         declared_preview = within(root, outfit['preview_file']) if outfit.get('preview_file') else None
@@ -250,7 +294,7 @@ def check(manifest, root, force_preview=False, files_only=False):
             if (w, h) != (2560, 1440):
                 raise ValueError('四视图画布必须为2560×1440')
             preview_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            sidecar = path.with_suffix(path.suffix + ".json")
+            sidecar = within(root, outfit["preview_record_file"]) if outfit.get("preview_record_file") else within(path.parent, "制作记录/" + path.name + ".json")
             record = json.loads(sidecar.read_text(encoding="utf-8-sig"))
             order = ["head", "front", "left", "back"]
             if not isinstance(record, dict) or record.get("kind") != "preview" or record.get("display_order") != order:
@@ -406,6 +450,7 @@ def check(manifest, root, force_preview=False, files_only=False):
                 review_errors.append(f"{outfit.get('name','套图') if isinstance(outfit,dict) else '套图'}/visual_record：{exc}")
     return {"scope": "files_and_record_integrity", "model_visual_checks": False,
             "check_mode": "files_only" if files_only else "full_delivery",
+            "delivery_location": delivery_location,
             "recorded_delivery_valid": not files_only and not errors and not review_errors,
             "file_checks_passed": not errors,
             "review_records_passed": not review_errors if require_review else None,

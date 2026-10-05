@@ -13,9 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
-const EDITOR=fs.existsSync(path.join(HERE,'editor.html'))?path.join(HERE,'editor.html'):path.join(HERE,'..','editor.html');
+const EDITOR=fs.existsSync(path.join(HERE,'编辑画布.html'))?path.join(HERE,'编辑画布.html'):path.join(HERE,'..','编辑画布.html');
 export const PORT=18743, ORIGIN=`http://127.0.0.1:${PORT}`, APP='character-canvas-v2';
-export const REVISION=16;
+export const REVISION=19;
 export const CACHE=process.env.CHARACTER_CANVAS_CACHE||path.join(os.tmpdir(),'CharacterSheetCanvas','cache');
 export const STATE=process.env.CHARACTER_CANVAS_STATE||path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'.cache'),'CharacterSheetCanvas');
 const ORT_VERSION='1.30.0', RUNTIME_FILES=['ort.all.min.mjs','ort-wasm-simd-threaded.jsep.mjs','ort-wasm-simd-threaded.jsep.wasm'];
@@ -106,7 +106,7 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
  const server=http.createServer(async(req,res)=>{
   try{
    if(req.headers.host!==`127.0.0.1:${port}`){json(res,403,{error:'仅接受本机连接'});return;}
-   const url=new URL(req.url,origin),pathname=url.pathname;
+   const url=new URL(req.url,origin),pathname=decodeURI(url.pathname);
    if(req.headers.origin&&req.headers.origin!==origin){json(res,403,{error:'请使用启动器打开模型模式'});return;}
    if(req.method==='OPTIONS'){res.writeHead(405);res.end();return;}
    if(pathname==='/api/status'&&req.method==='GET'){for(const [id,s]of Object.entries(states))if(s.status==='ready'&&(!await verifiedModel(id)||!await nativeReady(CACHE)))s.status='absent';const models=Object.fromEntries(Object.entries(states).map(([id,s])=>[id,{status:s.status,phase:s.phase,received:s.received,total:s.total,error:s.error}]));json(res,200,{app:APP,revision:REVISION,key,cache:CACHE,controlFile,models});return;}
@@ -116,19 +116,19 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
     await safeLocal(path.dirname(file),path.basename(file));
     const id=createHash('sha256').update(file).digest('hex').slice(0,20);projects.set(id,file);json(res,200,{url:origin+'/p/'+id+'/'});return;
    }
-   const deliveryRoute=pathname.match(/^\/p\/([a-f0-9]{20})\/(catalog|files\/(.+)|交付索引\.js)$/);
+   const deliveryRoute=pathname.match(/^\/p\/([a-f0-9]{20})\/(catalog|files\/(.+)|网页资源\/交付索引\.js)$/);
    if(deliveryRoute&&projects.has(deliveryRoute[1])){
     const folder=path.dirname(projects.get(deliveryRoute[1]));
     if(deliveryRoute[2]==='catalog'){
      if(req.headers['x-editor-key']!==key){json(res,403,{error:'请刷新编辑器'});return;}
-     let manifest={version:2,character:path.basename(folder),current:[],candidates:[]};try{manifest=JSON.parse(await fsp.readFile(path.join(folder,'画布清单.json'),'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
+     let manifest={version:2,character:path.basename(folder),current:[],candidates:[]};try{manifest=JSON.parse(await fsp.readFile(path.join(folder,'网页资源','画布清单.json'),'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
      const names={特写:'head',正面:'front',左侧面:'side',背面:'back'},rows=[];let entries=[];try{entries=await fsp.readdir(await safeLocal(folder,'候选'));}catch(e){if(e.code!=='ENOENT')throw e;}
      for(const name of entries){const m=name.match(/^(\d{6})_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/);if(!m)continue;const relative='候选/'+name;const file=await safeLocal(folder,relative),b=await fsp.readFile(file);if(!b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))continue;const sha=createHash('sha256').update(b).digest('hex'),view=names[m[2]],old=manifest.candidates.find(c=>c.path===relative&&c.sha256===sha);rows.push({...old,id:view+'-'+sha,view,name,path:relative,sha256:sha,sequence:+m[1],statusLabel:old?.statusLabel||'未验收'});}
      const current=[];for(const [name,view]of Object.entries({'01_特写.png':'head','02_正面.png':'front','03_左侧面.png':'side','04_背面.png':'back'})){try{const b=await fsp.readFile(await safeLocal(folder,name)),sha=createHash('sha256').update(b).digest('hex'),old=manifest.current.find(c=>c.view===view);current.push({...old,id:view+'-'+sha,view,name,path:name,sha256:sha});}catch(e){if(e.code!=='ENOENT')throw e;}}
      json(res,200,{...manifest,current,candidates:rows});return;
     }
-    const relative=deliveryRoute[2]==='交付索引.js'?'交付索引.js':decodeURIComponent(deliveryRoute[3]||'');
-    const allowed=relative==='交付索引.js'||/^(01_特写|02_正面|03_左侧面|04_背面)\.png$/.test(relative)||/^候选\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/.test(relative);
+    const relative=deliveryRoute[2]==='网页资源/交付索引.js'?'网页资源/交付索引.js':decodeURIComponent(deliveryRoute[3]||'');
+    const allowed=relative==='网页资源/交付索引.js'||/^(01_特写|02_正面|03_左侧面|04_背面)\.png$/.test(relative)||/^候选\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/.test(relative);
     if(!allowed){json(res,403,{error:'不是交付图片'});return;}await sendFile(req,res,await safeLocal(folder,relative),relative.endsWith('.js')?'text/javascript; charset=utf-8':'image/png');return;
    }
    if(pathname.startsWith('/api/')&&req.headers['x-editor-key']!==key){json(res,403,{error:'请刷新编辑器后重试'});return;}
@@ -150,9 +150,9 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
     const size=m.sizeInput,expected=3*size*size*4,chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;if(length>expected)throw Error('模型输入过大');chunks.push(chunk);}if(length!==expected)throw Error('模型输入不完整');const input=Buffer.concat(chunks),pixels=input.buffer.slice(input.byteOffset,input.byteOffset+input.byteLength),result=await matting.run(path.join(MODEL_DIR,id+'.onnx'),pixels,m.activation);res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':size*size,'Cache-Control':'no-store','X-Matting-Backend':result.backend});res.end(Buffer.from(result.alpha));return;
    }
    if(pathname==='/api/demo'&&req.method==='GET'){const html=await fsp.readFile(EDITOR,'utf8'),match=html.match(/<script id="demo-data" type="application\/json">([\s\S]*?)<\/script>/);json(res,200,JSON.parse(match?.[1]||'null'));return;}
-   if(pathname==='/api/stop'&&req.method==='POST'){if((matting.busy||Object.values(states).some(s=>s.status==='downloading'))){json(res,409,{error:'正在下载，请先取消'});return;}json(res,200,{ok:true});setTimeout(()=>server.close(),50);return;}
+   if(pathname==='/api/stop'&&req.method==='POST'){if((matting.busy||Object.values(states).some(s=>s.status==='downloading'))){json(res,409,{error:'正在下载，请先取消'});return;}json(res,200,{ok:true});setTimeout(()=>stop(),50);return;}
    if(!['GET','HEAD'].includes(req.method)){json(res,405,{error:'不支持此操作'});return;}
-   if(pathname==='/'||pathname==='/editor.html'){await sendFile(req,res,EDITOR,'text/html; charset=utf-8');return;}
+   if(pathname==='/'||pathname==='/编辑画布.html'){await sendFile(req,res,EDITOR,'text/html; charset=utf-8');return;}
    const project=pathname.match(/^\/p\/([a-f0-9]{20})\/?$/);if(project&&projects.has(project[1])){await sendFile(req,res,projects.get(project[1]),'text/html; charset=utf-8');return;}
    const model=pathname.match(/^\/models\/(lite512|lite1024)\.onnx$/);if(model&&states[model[1]].status==='ready'){await sendFile(req,res,path.join(MODEL_DIR,model[1]+'.onnx'),'application/octet-stream',true);return;}
    const runtime=pathname.match(/^\/runtime\/([^/]+)$/);if(runtime&&RUNTIME_FILES.includes(runtime[1])&&await runtimeReady()){await sendFile(req,res,path.join(RUNTIME,runtime[1]),runtime[1].endsWith('.wasm')?'application/wasm':'text/javascript',true);return;}
@@ -162,11 +162,24 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
  });
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
  await fsp.writeFile(controlFile,JSON.stringify({app:APP,key:control,port}),{mode:0o600});
+ let closing=null;
+ const stop=()=>closing||(closing=(async()=>{matting.close();for(const s of Object.values(states))s.abort?.abort();await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});await Promise.allSettled(Object.values(states).map(s=>s.promise).filter(Boolean));try{const own=JSON.parse(await fsp.readFile(controlFile,'utf8'));if(own.key===control)await fsp.unlink(controlFile);}catch(e){if(e.code!=='ENOENT')throw e;}})());
  server.on('close',()=>{matting.close();for(const s of Object.values(states))s.abort?.abort();});
- return {server,key,control,states,origin};
+ return {server,key,control,states,origin,stop};
 }
 async function health(){try{const r=await fetch(ORIGIN+'/api/status',{signal:AbortSignal.timeout(900)});const d=await r.json();if(d.app==='character-canvas-v1'||d.app===APP&&(d.revision||0)<REVISION){const stop=await fetch(ORIGIN+'/api/stop',{method:'POST',headers:{'X-Editor-Key':d.key},signal:AbortSignal.timeout(1500)});if(!stop.ok)throw Error('旧服务正在下载，请结束下载后启动新版。');await new Promise(r=>setTimeout(r,250));return null;}if(d.app!==APP)throw new Error('18743 端口被其他应用占用');return d;}catch(e){if(e.message.includes('其他应用')||e.message.includes('旧服务'))throw e;return null;}}
-async function openProject(file,noBrowser=false){let status=await health();if(!status){const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'--serve'],{detached:true,stdio:'ignore',windowsHide:true});child.unref();for(let i=0;i<35;i++){await new Promise(r=>setTimeout(r,200));status=await health();if(status)break;}if(!status)throw new Error('本机服务未能启动，请检查 Node.js 和端口 18743。');}let target=ORIGIN+'/';if(file){const info=JSON.parse(await fsp.readFile(status.controlFile||path.join(STATE,'hub-control.json'),'utf8'));const r=await fetch(ORIGIN+'/internal/register',{method:'POST',headers:{'Content-Type':'application/json','X-Control-Key':info.key},body:JSON.stringify({file:path.resolve(file)})});const data=await r.json();if(!r.ok)throw new Error(data.error);target=data.url;}if(noBrowser){console.log(target);return;}if(process.platform==='win32'){const ps=spawn('powershell.exe',['-NoProfile','-Command',`Start-Process '${target.replaceAll("'","''")}'`],{stdio:'ignore',windowsHide:true});ps.unref();}else if(process.platform==='darwin')spawn('open',[target],{stdio:'ignore'}).unref();else spawn('xdg-open',[target],{stdio:'ignore'}).unref();console.log(target);}
+async function foregroundProject(file,{noBrowser=false,port=PORT}={}){
+ if(file){file=path.resolve(file);await safeLocal(path.dirname(file),path.basename(file));if(!file.toLowerCase().endsWith('.html'))throw Error('请选择 HTML 画布文件');}
+ if(port===PORT&&await health())throw Error('后端服务已在运行，请关闭原服务终端后再启动。');
+ const hub=await startHub({port});const shutdown=()=>{hub.stop().catch(e=>{console.error(e.message);process.exitCode=1;});};
+ for(const signal of ['SIGINT','SIGTERM','SIGHUP'])process.once(signal,shutdown);
+ let target=hub.origin+'/';
+ try{if(file){const response=await fetch(hub.origin+'/internal/register',{method:'POST',headers:{'Content-Type':'application/json','X-Control-Key':hub.control},body:JSON.stringify({file})});const data=await response.json();if(!response.ok)throw Error(data.error);target=data.url;}
+ console.log('后端服务已启动：'+hub.origin);console.log('编辑画布：'+target);console.log('关闭此终端，或按 Ctrl+C，即可停止后端服务。');
+ if(!noBrowser){if(process.platform==='win32'){const ps=spawn('powershell.exe',['-NoProfile','-Command',`Start-Process '${target.replaceAll("'","''")}'`],{stdio:'ignore',windowsHide:true});ps.unref();}else if(process.platform==='darwin')spawn('open',[target],{stdio:'ignore'}).unref();else spawn('xdg-open',[target],{stdio:'ignore'}).unref();}
+ }catch(e){await hub.stop();throw e;}
+ return hub;
+}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- const args=process.argv.slice(2);try{if(args.includes('--serve')){await startHub();console.log('本机画布服务：'+ORIGIN);}else{const at=args.indexOf('--open');await openProject(at>=0?args[at+1]:EDITOR,args.includes('--no-browser'));}}catch(e){console.error(e.message);process.exitCode=1;}
+ const args=process.argv.slice(2);try{const at=args.indexOf('--open'),portAt=args.indexOf('--port'),port=portAt>=0?Number(args[portAt+1]):PORT;if(!Number.isInteger(port)||port<1||port>65535)throw Error('服务端口无效');await foregroundProject(at>=0?args[at+1]:args.includes('--serve')?null:EDITOR,{noBrowser:args.includes('--no-browser')||args.includes('--serve'),port});}catch(e){console.error(e.message);process.exitCode=1;}
 }

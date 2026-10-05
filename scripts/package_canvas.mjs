@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {digest,localPath,prepareRelease,releaseCanvas} from './release_canvas.mjs';
+import {digest,localPath,prepareRelease,releaseCanvas,migrateDelivery} from './release_canvas.mjs';
 export const ROLES={head:['01_特写.png','特写'],front:['02_正面.png','正面'],side:['03_左侧面.png','左侧面'],back:['04_背面.png','背面']};
 const readJSON=async(p,fallback)=>{try{return JSON.parse(await fs.readFile(p,'utf8'));}catch(e){if(e.code==='ENOENT')return fallback;throw e;}};
 const safeJSON=j=>JSON.stringify(j).replace(/</g,'\\u003c').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
@@ -15,7 +15,8 @@ export async function packageCanvas(config,{assets,baseDir=process.cwd()}={}){
  if(Object.keys(config.current).some(r=>!ROLES[r]))throw Error('current只接受head/front/side/back；制作清单的left请映射为side。');
  const root=path.resolve(baseDir,config.output),sourcePath=p=>{if(typeof p!=='string'||!p.trim())throw Error('图片路径为空。');return path.resolve(baseDir,p);};
  const bundle=await prepareRelease(assets);
- const manifestPath=await localPath(root,'画布清单.json');let existing=await readJSON(manifestPath,null);
+ const manifestPath=await localPath(root,'网页资源/画布清单.json');let existing=await readJSON(manifestPath,null);
+ if(!existing)existing=await readJSON(await localPath(root,'画布清单.json'),null);
  if(!existing){const legacy=await readJSON(await localPath(root,'交付清单.json'),null);existing=legacy?.version===2&&Array.isArray(legacy.candidates)?legacy:{version:2,character:config.character,candidates:[]};}
  if(existing.character!==config.character||!Array.isArray(existing.candidates))throw Error('已有账本不是此人物的候选目录。');
  const candidates=existing.candidates.map(c=>({...c})),keys=new Map(),bytes=new Map();let sequence=0;
@@ -36,11 +37,11 @@ export async function packageCanvas(config,{assets,baseDir=process.cwd()}={}){
  for(const c of candidates){await localPath(root,c.path);await localPath(root,c.dataScript);}for(const c of current)await localPath(root,c.path);
  let disk=[];try{disk=await fs.readdir(await localPath(root,'候选'));}catch(e){if(e.code!=='ENOENT')throw e;}
  const registered=new Set(candidates.map(c=>c.name));if(disk.some(n=>/^\d{6}_(特写|正面|左侧面|背面).*\.png$/.test(n)&&!registered.has(n)))throw Error('目录有未登记的视图候选，请明确来源后加入配置；不会删减图片。');
- await localPath(root,'交付索引.js');await localPath(root,'制作记录/网页释放.json');for(const f of bundle.files)await localPath(root,f.path);
- await fs.mkdir(root,{recursive:true});await fs.mkdir(await localPath(root,'候选'),{recursive:true});await fs.mkdir(await localPath(root,'制作记录/画布数据'),{recursive:true});
+ await localPath(root,'网页资源/交付索引.js');await localPath(root,'制作记录/网页释放.json');for(const f of bundle.files)await localPath(root,f.path);
+ await fs.mkdir(root,{recursive:true});await migrateDelivery(root);await fs.mkdir(await localPath(root,'候选'),{recursive:true});await fs.mkdir(await localPath(root,'制作记录/画布数据'),{recursive:true});
  for(const c of candidates){const b=bytes.get(c.id);await unchangedCopy(await localPath(root,c.path),b);await fs.writeFile(await localPath(root,c.dataScript),'window.dispatchEvent(new CustomEvent("character-image",{detail:'+safeJSON({id:c.id,data:'data:image/png;base64,'+b.toString('base64')})+'}));\n');}
  for(const c of current){const b=bytes.get(c.id),dest=await localPath(root,c.path);try{const old=await fs.readFile(dest);if(digest(old)!==c.sha256){const backup=await localPath(root,'制作记录/被替换单图/'+c.name.slice(0,-4)+'_'+digest(old).slice(0,12)+'.png');await fs.mkdir(path.dirname(backup),{recursive:true});await unchangedCopy(backup,old);}}catch(e){if(e.code!=='ENOENT')throw e;}await fs.writeFile(dest,b);}
- const manifest={version:2,character:config.character,current:current.map(({data,...c})=>c),candidates};await fs.writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');await fs.writeFile(await localPath(root,'交付索引.js'),'window.CHARACTER_DELIVERY='+safeJSON({...manifest,current})+';\n');
+ const manifest={version:2,character:config.character,current:current.map(({data,...c})=>c),candidates};await fs.writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');await fs.writeFile(await localPath(root,'网页资源/交付索引.js'),'window.CHARACTER_DELIVERY='+safeJSON({...manifest,current})+';\n');
  const release=await releaseCanvas(root,{prepared:bundle});return {root,count:candidates.length,current:current.map(c=>c.name),sequence,release};
 }
 

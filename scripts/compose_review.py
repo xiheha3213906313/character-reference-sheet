@@ -74,12 +74,13 @@ def save(canvas, output, record, sources):
         raise ValueError("输出必须使用.png扩展名")
     if output in {p.resolve() for p in sources}:
         raise ValueError("输出不能覆盖输入图片")
-    sidecar = output.with_suffix(output.suffix + ".json")
+    sidecar = (output.parent / "制作记录" / (output.name + ".json")) if record.get("kind") == "preview" else output.with_suffix(output.suffix + ".json")
     if sidecar in {p.resolve() for p in sources}:
         raise ValueError("记录不能覆盖输入文件")
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output, format="PNG")
     record.update({"output_file": output.name, "output_sha256": digest(output), "canvas": list(canvas.size)})
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"image": str(output), "record": str(sidecar)}
 
@@ -214,7 +215,7 @@ def preview(args, font_path):
             raise ValueError('总览不能放在其他套图目录中')
         used.add(output)
         inputs = {role: within(folder, outfit["files"][role]) for role in DISPLAY_ORDER}
-        if output in set(inputs.values()) or output.with_suffix('.png.json') in set(inputs.values()):
+        if output in set(inputs.values()) or output.parent / '制作记录' / (output.name + '.json') in set(inputs.values()):
             raise ValueError('总览或旁录不能覆盖当前单图')
         plans.append((outfit, output, inputs))
     outputs = []

@@ -2,6 +2,7 @@
 import argparse
 import base64
 import hashlib
+import io
 import json
 import math
 import os
@@ -13,13 +14,15 @@ import sys
 ROLES = ("head", "front", "back", "left")
 
 
-def overview_name(character_name, outfit_name):
+def overview_name(character_name, outfit_name, extension='.jpg'):
     for value in (character_name, outfit_name):
         if not isinstance(value, str) or not value.strip() or re.search(r'[<>:"/\\|?*\x00-\x1f]', value):
             raise ValueError('角色与造型名称须为有效文件名文本')
     if re.fullmatch(r'(套装|造型|款式|outfit|set)[ _-]*([0-9]+|[A-Za-z])', outfit_name, re.I):
         raise ValueError('造型后缀须描述服装内容，不能只用套装编号')
-    return f'{character_name.strip()}_{outfit_name.strip()}.png'
+    if extension.lower() not in ('.jpg', '.jpeg', '.png'):
+        raise ValueError('总览扩展名须为JPG，或用户另指定的PNG')
+    return f'{character_name.strip()}_{outfit_name.strip()}{extension.lower()}'
 
 
 def within(base, relative):
@@ -100,13 +103,35 @@ def png_size(path):
     return w, h
 
 
+def canvas_image_data(folder, entry):
+    script_path = entry.get('dataScript', '')
+    if not re.fullmatch(r'(网页资源|制作记录)/画布数据/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png\.js', script_path):
+        raise ValueError('候选加载数据路径无效')
+    script = within(folder, script_path).read_text(encoding='utf-8-sig').strip()
+    prefix, suffix = 'window.dispatchEvent(new CustomEvent("character-image",{detail:', '}));'
+    if not script.startswith(prefix) or not script.endswith(suffix):
+        raise ValueError('候选加载脚本格式不符：' + script_path)
+    payload = json.loads(script[len(prefix):-len(suffix)])
+    if payload.get('id') != entry.get('id') or not str(payload.get('data', '')).startswith('data:image/png;base64,'):
+        raise ValueError('候选加载脚本身份或数据格式不符')
+    data = base64.b64decode(payload['data'].split(',', 1)[1], validate=True)
+    if len(data) < 24 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+        raise ValueError('候选加载脚本未保存完整PNG')
+    if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
+        raise ValueError('候选加载数据与账本哈希不符')
+    if list(struct.unpack('>II', data[16:24])) != [entry.get('width'), entry.get('height')]:
+        raise ValueError('候选加载数据尺寸与账本不符')
+    return data
+
+
 def check_editor(folder, files):
     """Check released bytes and local image data; never approves image quality."""
     release = json.loads(within(folder, '制作记录/网页释放.json').read_text(encoding='utf-8-sig'))
     required = {'编辑画布.html', '网页资源/后端服务.cmd', '使用说明.md', '网页资源/release.json',
                 '网页资源/hub.mjs', '网页资源/launch.ps1', '网页资源/native-runtime.mjs',
                 '网页资源/native-runtime-manifest.json', '网页资源/native-worker.mjs',
-                '网页资源/native-matting.mjs'}
+                '网页资源/native-matting.mjs', '网页资源/shared-sampling.mjs',
+                '网页资源/shared-worker.mjs', '网页资源/shared-matting.mjs'}
     entries = release.get('files', [])
     if (release.get('schemaVersion') != 1 or len(entries) != len(required)
             or {e.get('path') for e in entries} != required):
@@ -141,25 +166,31 @@ def check_editor(folder, files):
         data = within(folder, files[role]).read_bytes()
         if entry.get('path') != files[role] or entry.get('sha256') != hashlib.sha256(data).hexdigest():
             raise ValueError('网页当前图不是已声明的交付版本：' + role)
-        if entry.get('data') != 'data:image/png;base64,' + base64.b64encode(data).decode('ascii'):
-            raise ValueError('网页内嵌当前图与PNG不一致：' + role)
+        if entry.get('data') is not None:
+            if entry['data'] != 'data:image/png;base64,' + base64.b64encode(data).decode('ascii'):
+                raise ValueError('旧网页内嵌当前图与PNG不一致：' + role)
+        elif canvas_image_data(folder, entry) != data:
+            raise ValueError('网页当前图与共用加载数据不一致：' + role)
     candidates = manifest.get('candidates', [])
     archived_paths = set()
     for entry in candidates:
         if not str(entry.get('path', '')).startswith('候选/') or entry.get('view') not in role_map.values():
             raise ValueError('候选账本路径或视图无效')
-        data = within(folder, entry['path']).read_bytes()
-        if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
-            raise ValueError('候选PNG与账本不符：' + entry['path'])
-        payload = json.dumps({'id': entry['id'], 'data': 'data:image/png;base64,' + base64.b64encode(data).decode('ascii')}, ensure_ascii=False, separators=(',', ':'))
-        expected = 'window.dispatchEvent(new CustomEvent("character-image",{detail:' + payload + '}));'
-        if within(folder, entry['dataScript']).read_text(encoding='utf-8-sig').strip() != expected:
-            raise ValueError('候选加载脚本缺失或内容不符：' + entry['path'])
+        data = canvas_image_data(folder, entry)
+        png = within(folder, entry['path'])
+        if png.exists() and png.read_bytes() != data:
+            raise ValueError('单独候选PNG与加载数据不符：' + entry['path'])
         archived_paths.add(entry['path'])
-    disk_paths = {'候选/' + p.name for p in within(folder, '候选').iterdir()
-                  if p.is_file() and re.fullmatch(r'\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png', p.name)}
-    if disk_paths != archived_paths:
+    candidate_folder = within(folder, '候选')
+    disk_paths = {'候选/' + p.name for p in candidate_folder.iterdir()
+                  if p.is_file() and re.fullmatch(r'\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png', p.name)} if candidate_folder.exists() else set()
+    if not disk_paths.issubset(archived_paths) or (manifest.get('candidatePngs') is True and disk_paths != archived_paths):
         raise ValueError('候选目录存在未登记或遗漏图片')
+    if manifest.get('candidatePngs') is False and disk_paths:
+        raise ValueError('本次不交付独立候选PNG，请备份移出旧候选目录，保留全部画布数据')
+    candidate_ids = {c['id'] for c in candidates}
+    if any(entry.get('id') not in candidate_ids for entry in current.values()):
+        raise ValueError('当前四图缺少对应候选记录')
     return {'folder': str(folder), 'ui_revision': release.get('uiRevision'), 'candidate_count': len(candidates)}
 
 
@@ -286,11 +317,14 @@ def check(manifest, root, force_preview=False, files_only=False):
             if key in seen_previews:
                 raise ValueError("不同套图不能共用同一预览")
             seen_previews.add(key)
-            if not path.is_file() or path.suffix.lower() != ".png":
-                raise ValueError("预览PNG不存在")
-            if path.name != overview_name(manifest.get('character_name'), outfit.get('name')):
-                raise ValueError('总览文件名应为角色名称_描述性造型后缀.png')
-            w, h = png_size(path)
+            if not path.is_file() or path.suffix.lower() not in ('.jpg', '.jpeg', '.png'):
+                raise ValueError('总览JPG不存在，或不是支持的图片格式')
+            if path.name != overview_name(manifest.get('character_name'), outfit.get('name'), path.suffix):
+                raise ValueError('总览文件名应为角色名称_描述性造型后缀.jpg')
+            with Image.open(path) as image:
+                w, h = image.size
+                if image.format != ('PNG' if path.suffix.lower() == '.png' else 'JPEG'):
+                    raise ValueError('总览扩展名与实际图片编码不符')
             if (w, h) != (2560, 1440):
                 raise ValueError('四视图画布必须为2560×1440')
             preview_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -416,8 +450,25 @@ def check(manifest, root, force_preview=False, files_only=False):
             for role in ('front', 'left', 'back', 'head'):
                 reconstructed.alpha_composite(actual_images[role].resize(actual_sizes[role], Image.Resampling.LANCZOS),
                                                actual_positions[role])
+            expected_pixels = reconstructed.convert('RGB')
+            if path.suffix.lower() in ('.jpg', '.jpeg'):
+                export = record.get('export', {})
+                if export.get('format') != 'JPEG' or export.get('quality') != 99 or export.get('chroma_subsampling') != '4:4:4':
+                    raise ValueError('总览旁录须声明JPEG质量99及4:4:4采样')
+                if export.get('rgb_sha256') and export['rgb_sha256'] != hashlib.sha256(expected_pixels.tobytes()).hexdigest():
+                    raise ValueError('JPEG编码前画布与所记录的源图和位置不符')
+                encoded = io.BytesIO()
+                expected_pixels.save(encoded, format='JPEG', quality=99, subsampling=0, optimize=True)
+                encoded.seek(0)
+                with Image.open(encoded) as expected_jpeg:
+                    tables = expected_jpeg.quantization
+                    expected_pixels = expected_jpeg.convert('RGB')
+                from PIL.JpegImagePlugin import get_sampling
+                with Image.open(path) as actual_jpeg:
+                    if actual_jpeg.quantization != tables or get_sampling(actual_jpeg) != 0:
+                        raise ValueError('实际总览JPEG不是质量99、4:4:4编码')
             with Image.open(path) as actual_preview:
-                if ImageChops.difference(reconstructed.convert('RGB'), actual_preview.convert('RGB')).getbbox():
+                if ImageChops.difference(expected_pixels, actual_preview.convert('RGB')).getbbox():
                     raise ValueError('实际总览与所记录的源图、缩放及位置不符，需重新制作')
             previews.append({"outfit": name, "file": str(path), "width": w, "height": h,
                              "sha256": preview_hash, "source_record": str(sidecar), "layout_metrics": geometry})

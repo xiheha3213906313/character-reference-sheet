@@ -70,15 +70,22 @@ def fit_font(draw, text, font_path, size, width):
 
 def save(canvas, output, record, sources):
     output = output.resolve()
-    if output.suffix.lower() != ".png":
-        raise ValueError("输出必须使用.png扩展名")
+    is_jpg = output.suffix.lower() in ('.jpg', '.jpeg') and record.get('kind') == 'preview'
+    if output.suffix.lower() != '.png' and not is_jpg:
+        raise ValueError('总览默认使用.jpg；对照图使用.png')
     if output in {p.resolve() for p in sources}:
         raise ValueError("输出不能覆盖输入图片")
     sidecar = (output.parent / "制作记录" / (output.name + ".json")) if record.get("kind") == "preview" else output.with_suffix(output.suffix + ".json")
     if sidecar in {p.resolve() for p in sources}:
         raise ValueError("记录不能覆盖输入文件")
     output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output, format="PNG")
+    if is_jpg:
+        pixels = canvas.convert('RGB')
+        record['export'] = {'format': 'JPEG', 'quality': 99, 'chroma_subsampling': '4:4:4',
+                            'rgb_sha256': hashlib.sha256(pixels.tobytes()).hexdigest()}
+        pixels.save(output, format='JPEG', quality=99, subsampling=0, optimize=True)
+    else:
+        canvas.save(output, format='PNG')
     record.update({"output_file": output.name, "output_sha256": digest(output), "canvas": list(canvas.size)})
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -207,10 +214,10 @@ def preview(args, font_path):
         if not isinstance(outfit.get("files"), dict) or set(outfit["files"]) != set(ROLES):
             raise ValueError("每套files需包含head/front/back/left四项")
         output = within(root, outfit.get("preview_file"))
-        if output.name != overview_name(manifest.get('character_name'), outfit.get('name')):
-            raise ValueError('总览文件名须为角色名称_描述性造型后缀.png')
-        if output.suffix.lower() != ".png" or output in used:
-            raise ValueError("每套preview_file须为独立PNG路径")
+        if output.name != overview_name(manifest.get('character_name'), outfit.get('name'), output.suffix):
+            raise ValueError('总览文件名须为角色名称_描述性造型后缀.jpg')
+        if output.suffix.lower() not in ('.jpg', '.jpeg', '.png') or output in used:
+            raise ValueError('每套preview_file须为独立JPG路径，或用户指定的PNG路径')
         if any(output.is_relative_to(other) and other != folder for other in folders):
             raise ValueError('总览不能放在其他套图目录中')
         used.add(output)

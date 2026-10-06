@@ -2,6 +2,7 @@
 import http from 'node:http';
 import{nativeReady,installNative}from'./native-runtime.mjs';
 import{NativeMatting}from'./native-matting.mjs';
+import{SharedMatting}from'./shared-matting.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -15,7 +16,7 @@ import { spawn } from 'node:child_process';
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const EDITOR=fs.existsSync(path.join(HERE,'编辑画布.html'))?path.join(HERE,'编辑画布.html'):path.join(HERE,'..','编辑画布.html');
 export const PORT=18743, ORIGIN=`http://127.0.0.1:${PORT}`, APP='character-canvas-v2';
-export const REVISION=19;
+export const REVISION=47;
 export const CACHE=process.env.CHARACTER_CANVAS_CACHE||path.join(os.tmpdir(),'CharacterSheetCanvas','cache');
 export const STATE=process.env.CHARACTER_CANVAS_STATE||path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'.cache'),'CharacterSheetCanvas');
 const ORT_VERSION='1.30.0', RUNTIME_FILES=['ort.all.min.mjs','ort-wasm-simd-threaded.jsep.mjs','ort-wasm-simd-threaded.jsep.wasm'];
@@ -102,7 +103,7 @@ async function safeLocal(root,relative){const base=await fsp.realpath(root);cons
 export async function startHub({port=PORT,fetcher=fetchDownload}={}){
  await fsp.mkdir(CACHE,{recursive:true});await fsp.mkdir(STATE,{recursive:true});const key=randomBytes(24).toString('hex'),control=randomBytes(32).toString('hex'),projects=new Map(),states={};
  for(const id of Object.keys(MODELS))states[id]={status:await verifiedModel(id)&&await nativeReady(CACHE)?'ready':'absent',received:0,total:MODELS[id].size};
- const origin=`http://127.0.0.1:${port}`,matting=new NativeMatting(CACHE),controlFile=path.join(STATE,`hub-control-${port}.json`);
+ const origin=`http://127.0.0.1:${port}`,matting=new NativeMatting(CACHE),shared=new SharedMatting(),controlFile=path.join(STATE,`hub-control-${port}.json`);
  const server=http.createServer(async(req,res)=>{
   try{
    if(req.headers.host!==`127.0.0.1:${port}`){json(res,403,{error:'仅接受本机连接'});return;}
@@ -116,19 +117,22 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
     await safeLocal(path.dirname(file),path.basename(file));
     const id=createHash('sha256').update(file).digest('hex').slice(0,20);projects.set(id,file);json(res,200,{url:origin+'/p/'+id+'/'});return;
    }
-   const deliveryRoute=pathname.match(/^\/p\/([a-f0-9]{20})\/(catalog|files\/(.+)|网页资源\/交付索引\.js)$/);
+   const deliveryRoute=pathname.match(/^\/p\/([a-f0-9]{20})\/(catalog|files\/(.+)|网页资源\/交付索引\.js|网页资源\/画布数据\/\d{6}_(?:特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png\.js)$/);
    if(deliveryRoute&&projects.has(deliveryRoute[1])){
     const folder=path.dirname(projects.get(deliveryRoute[1]));
     if(deliveryRoute[2]==='catalog'){
      if(req.headers['x-editor-key']!==key){json(res,403,{error:'请刷新编辑器'});return;}
      let manifest={version:2,character:path.basename(folder),current:[],candidates:[]};try{manifest=JSON.parse(await fsp.readFile(path.join(folder,'网页资源','画布清单.json'),'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
-     const names={特写:'head',正面:'front',左侧面:'side',背面:'back'},rows=[];let entries=[];try{entries=await fsp.readdir(await safeLocal(folder,'候选'));}catch(e){if(e.code!=='ENOENT')throw e;}
-     for(const name of entries){const m=name.match(/^(\d{6})_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/);if(!m)continue;const relative='候选/'+name;const file=await safeLocal(folder,relative),b=await fsp.readFile(file);if(!b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))continue;const sha=createHash('sha256').update(b).digest('hex'),view=names[m[2]],old=manifest.candidates.find(c=>c.path===relative&&c.sha256===sha);rows.push({...old,id:view+'-'+sha,view,name,path:relative,sha256:sha,sequence:+m[1],statusLabel:old?.statusLabel||'未验收'});}
+     const names={特写:'head',正面:'front',左侧面:'side',背面:'back'},rows=[];
+     // Keep the packaged candidates when their separate PNG folder is omitted.
+     for(const candidate of manifest.candidates||[]){if(!/^网页资源\/画布数据\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png\.js$/.test(candidate.dataScript||''))continue;try{await safeLocal(folder,candidate.dataScript);rows.push(candidate);}catch(e){if(e.code!=='ENOENT')throw e;}}
+     let entries=[];try{entries=await fsp.readdir(await safeLocal(folder,'候选'));}catch(e){if(e.code!=='ENOENT')throw e;}
+     for(const name of entries){const m=name.match(/^(\d{6})_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/);if(!m)continue;const relative='候选/'+name;const file=await safeLocal(folder,relative),b=await fsp.readFile(file);if(!b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))continue;const sha=createHash('sha256').update(b).digest('hex'),view=names[m[2]],old=manifest.candidates.find(c=>c.path===relative&&c.sha256===sha);const row={...old,id:view+'-'+sha,view,name,path:relative,sha256:sha,sequence:+m[1],statusLabel:old?.statusLabel||'未验收'},existing=rows.findIndex(candidate=>candidate.id===row.id);if(existing<0)rows.push(row);else rows[existing]=row;}
      const current=[];for(const [name,view]of Object.entries({'01_特写.png':'head','02_正面.png':'front','03_左侧面.png':'side','04_背面.png':'back'})){try{const b=await fsp.readFile(await safeLocal(folder,name)),sha=createHash('sha256').update(b).digest('hex'),old=manifest.current.find(c=>c.view===view);current.push({...old,id:view+'-'+sha,view,name,path:name,sha256:sha});}catch(e){if(e.code!=='ENOENT')throw e;}}
      json(res,200,{...manifest,current,candidates:rows});return;
     }
-    const relative=deliveryRoute[2]==='网页资源/交付索引.js'?'网页资源/交付索引.js':decodeURIComponent(deliveryRoute[3]||'');
-    const allowed=relative==='网页资源/交付索引.js'||/^(01_特写|02_正面|03_左侧面|04_背面)\.png$/.test(relative)||/^候选\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/.test(relative);
+    const relative=deliveryRoute[2].startsWith('网页资源/')?deliveryRoute[2]:decodeURIComponent(deliveryRoute[3]||'');
+    const allowed=relative==='网页资源/交付索引.js'||/^网页资源\/画布数据\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png\.js$/.test(relative)||/^(01_特写|02_正面|03_左侧面|04_背面)\.png$/.test(relative)||/^候选\/\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/.test(relative);
     if(!allowed){json(res,403,{error:'不是交付图片'});return;}await sendFile(req,res,await safeLocal(folder,relative),relative.endsWith('.js')?'text/javascript; charset=utf-8':'image/png');return;
    }
    if(pathname.startsWith('/api/')&&req.headers['x-editor-key']!==key){json(res,403,{error:'请刷新编辑器后重试'});return;}
@@ -143,14 +147,22 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
     s.promise=(async()=>{try{await installNative(CACHE,{signal,fetcher,onProgress:(n,t)=>{s.received=n;s.total=t;},onPhase:phase=>{s.phase=phase;s.received=0;s.total=0;}});s.phase='下载模型';s.received=0;s.total=m.size;const dest=path.join(MODEL_DIR,id+'.onnx');const info=await downloadModelFile(id,dest,{signal,fetcher,onProgress:(n,t)=>{s.received=n;s.total=t;},onSource:source=>{s.phase='下载模型 · '+source;s.received=0;s.total=m.size;}});const stat=await fsp.stat(dest);await fsp.writeFile(path.join(MODEL_DIR,id+'.json'),JSON.stringify({...info,sha256:m.sha256,size:m.size,mtimeMs:stat.mtimeMs,repo:m.repo,revision:m.revision},null,2));s.status='ready';s.phase='已下载';}catch(e){s.status=signal.aborted?'absent':'error';s.error=signal.aborted?null:String(e.message||e);}finally{s.abort=null;}})();
     json(res,202,{ok:true,status:'downloading'});return;
    }
+   if(pathname==='/api/matte/basic'&&req.method==='POST'){
+    if(shared.busy||matting.busy){json(res,409,{error:'正在去除背景，请稍后。'});return;}
+    if(req.headers['content-type']!=='application/octet-stream'){json(res,415,{error:'图片输入格式不符'});return;}
+    const options=JSON.parse(req.headers['x-matting-options']||'{}'),{width,height,strength,feather,key,global}=options;
+    if(!Number.isInteger(width)||!Number.isInteger(height)||width<2||height<2||width>1600||height>1600||!Number.isFinite(strength)||strength<0||strength>100||!Number.isFinite(feather)||feather<0||feather>5||typeof global!=='boolean'||key!==null&&(!Array.isArray(key)||key.length!==3||key.some(v=>!Number.isFinite(v)||v<0||v>255))){json(res,400,{error:'Shared Sampling 参数不符'});return;}
+    const expected=width*height*4,chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;if(length>expected)throw Error('图片输入过大');chunks.push(chunk);}if(length!==expected)throw Error('图片输入不完整');
+    const input=Buffer.concat(chunks),pixels=input.buffer.slice(input.byteOffset,input.byteOffset+input.byteLength),result=await shared.run(pixels,width,height,{strength,feather,key,global});res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':expected,'Cache-Control':'no-store','X-Matting-Backend':result.backend});res.end(Buffer.from(result.pixels));return;
+   }
    const matte=pathname.match(/^\/api\/matte\/(full|ben2|rmbg2)$/);
    if(matte&&req.method==='POST'){
-    const id=matte[1],m=MODELS[id];if(states[id].status!=='ready'){json(res,409,{error:'请先下载所选模型'});return;}if(matting.busy){json(res,409,{error:'高质量模型正在处理，请稍后。'});return;}
+    const id=matte[1],m=MODELS[id];if(states[id].status!=='ready'){json(res,409,{error:'请先下载所选模型'});return;}if(matting.busy||shared.busy){json(res,409,{error:'正在去除背景，请稍后。'});return;}
     if(req.headers['content-type']!=='application/octet-stream'){json(res,415,{error:'模型输入格式不符'});return;}
     const size=m.sizeInput,expected=3*size*size*4,chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;if(length>expected)throw Error('模型输入过大');chunks.push(chunk);}if(length!==expected)throw Error('模型输入不完整');const input=Buffer.concat(chunks),pixels=input.buffer.slice(input.byteOffset,input.byteOffset+input.byteLength),result=await matting.run(path.join(MODEL_DIR,id+'.onnx'),pixels,m.activation);res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':size*size,'Cache-Control':'no-store','X-Matting-Backend':result.backend});res.end(Buffer.from(result.alpha));return;
    }
    if(pathname==='/api/demo'&&req.method==='GET'){const html=await fsp.readFile(EDITOR,'utf8'),match=html.match(/<script id="demo-data" type="application\/json">([\s\S]*?)<\/script>/);json(res,200,JSON.parse(match?.[1]||'null'));return;}
-   if(pathname==='/api/stop'&&req.method==='POST'){if((matting.busy||Object.values(states).some(s=>s.status==='downloading'))){json(res,409,{error:'正在下载，请先取消'});return;}json(res,200,{ok:true});setTimeout(()=>stop(),50);return;}
+   if(pathname==='/api/stop'&&req.method==='POST'){if((matting.busy||shared.busy||Object.values(states).some(s=>s.status==='downloading'))){json(res,409,{error:'正在处理或下载，请完成或取消后再停止'});return;}json(res,200,{ok:true});setTimeout(()=>stop(),50);return;}
    if(!['GET','HEAD'].includes(req.method)){json(res,405,{error:'不支持此操作'});return;}
    if(pathname==='/'||pathname==='/编辑画布.html'){await sendFile(req,res,EDITOR,'text/html; charset=utf-8');return;}
    const project=pathname.match(/^\/p\/([a-f0-9]{20})\/?$/);if(project&&projects.has(project[1])){await sendFile(req,res,projects.get(project[1]),'text/html; charset=utf-8');return;}
@@ -163,8 +175,8 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
  await fsp.writeFile(controlFile,JSON.stringify({app:APP,key:control,port}),{mode:0o600});
  let closing=null;
- const stop=()=>closing||(closing=(async()=>{matting.close();for(const s of Object.values(states))s.abort?.abort();await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});await Promise.allSettled(Object.values(states).map(s=>s.promise).filter(Boolean));try{const own=JSON.parse(await fsp.readFile(controlFile,'utf8'));if(own.key===control)await fsp.unlink(controlFile);}catch(e){if(e.code!=='ENOENT')throw e;}})());
- server.on('close',()=>{matting.close();for(const s of Object.values(states))s.abort?.abort();});
+ const stop=()=>closing||(closing=(async()=>{matting.close();shared.close();for(const s of Object.values(states))s.abort?.abort();await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});await Promise.allSettled(Object.values(states).map(s=>s.promise).filter(Boolean));try{const own=JSON.parse(await fsp.readFile(controlFile,'utf8'));if(own.key===control)await fsp.unlink(controlFile);}catch(e){if(e.code!=='ENOENT')throw e;}})());
+ server.on('close',()=>{matting.close();shared.close();for(const s of Object.values(states))s.abort?.abort();});
  return {server,key,control,states,origin,stop};
 }
 async function health(){try{const r=await fetch(ORIGIN+'/api/status',{signal:AbortSignal.timeout(900)});const d=await r.json();if(d.app==='character-canvas-v1'||d.app===APP&&(d.revision||0)<REVISION){const stop=await fetch(ORIGIN+'/api/stop',{method:'POST',headers:{'X-Editor-Key':d.key},signal:AbortSignal.timeout(1500)});if(!stop.ok)throw Error('旧服务正在下载，请结束下载后启动新版。');await new Promise(r=>setTimeout(r,250));return null;}if(d.app!==APP)throw new Error('18743 端口被其他应用占用');return d;}catch(e){if(e.message.includes('其他应用')||e.message.includes('旧服务'))throw e;return null;}}

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "uiRevision": 19,
+  "uiRevision": 47,
   "layoutVersion": 2,
   "files": [
     {
       "path": "编辑画布.html",
-      "size": 153134,
-      "sha256": "80ebec9138f14f6c11c05335b1033a7b8646a75b6b815f5010473c60f36e9e70"
+      "size": 199482,
+      "sha256": "4c2971bb20c2e7e90e461903c62cf0fc169aae89b541ae26ec767835ae4f7864"
     },
     {
       "path": "网页资源/后端服务.cmd",
@@ -15,13 +15,13 @@
     },
     {
       "path": "使用说明.md",
-      "size": 2498,
-      "sha256": "c9decc47c61a9319281a0c2d605a67f6bf816d744ddb02acd818c6ac41b5ad7d"
+      "size": 8169,
+      "sha256": "32032636882b664d8c5100fdac306d9fff28df38497a18aaee7a2b6b07bf9978"
     },
     {
       "path": "网页资源/hub.mjs",
-      "size": 20519,
-      "sha256": "fea8dd8f76ecc8383ed8fdde3491f5343c2263317a38141dbeae0fecc504444e"
+      "size": 22642,
+      "sha256": "7cd1189d2b49bb4f828aef5847a93c0249bf2aa974abe4c2af87d687936d918f"
     },
     {
       "path": "网页资源/launch.ps1",
@@ -47,6 +47,21 @@
       "path": "网页资源/native-matting.mjs",
       "size": 1677,
       "sha256": "4ed27669eb04cd22be654bc1ea483989ae430175d7bda2d92d63a8ae7e29ece1"
+    },
+    {
+      "path": "网页资源/shared-sampling.mjs",
+      "size": 12863,
+      "sha256": "c046d43c66c513e8f792f3c0bffb990d305eca6b4654922f7e9de1b02e74e309"
+    },
+    {
+      "path": "网页资源/shared-worker.mjs",
+      "size": 414,
+      "sha256": "2325c9563c967dbee0a36ce879f57a56c5279cc4b9ffce46a55b59ea1cd730c4"
+    },
+    {
+      "path": "网页资源/shared-matting.mjs",
+      "size": 1240,
+      "sha256": "6531d8b37d1419b227763c1c318ed11a57c36b225c40bc857ed0b85fec1862f3"
     }
   ]
 }

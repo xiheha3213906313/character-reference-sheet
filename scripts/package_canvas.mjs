@@ -3,15 +3,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {digest,localPath,prepareRelease,releaseCanvas,migrateDelivery} from './release_canvas.mjs';
+import {pngSize} from './png_validation.mjs';
 export const ROLES={head:['01_特写.png','特写'],front:['02_正面.png','正面'],side:['03_左侧面.png','左侧面'],back:['04_背面.png','背面']};
 const readJSON=async(p,fallback)=>{try{return JSON.parse(await fs.readFile(p,'utf8'));}catch(e){if(e.code==='ENOENT')return fallback;throw e;}};
 const safeJSON=j=>JSON.stringify(j).replace(/</g,'\\u003c').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
 const DATA_DIR='网页资源/画布数据/';
 const CANDIDATE_NAME=/^\d{6}_(特写|正面|左侧面|背面)(?:_历史导入_[a-f0-9]{8})?\.png$/;
 function imageBytes(b,expected,label){
- if(b.length<24||!b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||b.toString('ascii',12,16)!=='IHDR'||!b.readUInt32BE(16)||!b.readUInt32BE(20))throw Error('需要有效PNG：'+label);
+ const size=pngSize(b,label);
  const sha256=digest(b);if(expected&&expected!==sha256)throw Error('来源哈希不匹配：'+label);
- return{b,sha256,width:b.readUInt32BE(16),height:b.readUInt32BE(20)};
+ return{b,sha256,...size};
 }
 async function image(src,expected){return imageBytes(await fs.readFile(src),expected,src);}
 async function noConflict(dest,b){try{if(digest(await fs.readFile(dest))!==digest(b))throw Error('已有候选内容不同，拒绝覆盖：'+dest);}catch(e){if(e.code!=='ENOENT')throw e;}}

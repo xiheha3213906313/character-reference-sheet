@@ -43,3 +43,5 @@ JSON `schema_version:1`；`source` 和 mask 路径相对 JSON 所在目录，`ca
 - `polygon`：`points`；`ellipse`：`box:[x0,y0,x1,y1]`；`annulus`：相同 `box` 加 `width_fraction`，表示保留中央孔洞的闭合环带；`mask`：与画布等大的灰度占据 mask。复杂孔洞/变截面/披衣可以使用已核对 mask，路径点不得误连不同部件。放射件等分别建模，不自动猜数量或等距复制。
 
 `depth_value:1..255` 只表示相对层级；局部 `nearer_than` 用于检查数值矛盾，不推断真实遮挡。循环相互遮挡须拆区段后重新定义。材质 Alpha 另由参考与验收处理，不写进深度值。输出 `silhouette_structure.png`、`rear_layers.png`、主体 mask 和带哈希的旁录，状态初始为 `not_evaluated`。需要先实际看生成的 B/D；脚本成功不能替代视觉验收。
+
+主体 `body_depth` 默认为130，和parts使用同一1..255整数层级。D在每个重叠像素保留最大深度值（更近部分），相同深度显示相同灰度，不靠绘制顺序裁定远近。B仍展示完整占据区域，包括被主体遮住的结构路线；不能用B的重叠颜色当作D的可见遮挡。同一部件前后交替时拆成区段并给对应深度值。

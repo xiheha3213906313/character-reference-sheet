@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "uiRevision": 47,
+  "uiRevision": 48,
   "layoutVersion": 2,
   "files": [
     {
@@ -20,8 +20,8 @@
     },
     {
       "path": "网页资源/hub.mjs",
-      "size": 22642,
-      "sha256": "7cd1189d2b49bb4f828aef5847a93c0249bf2aa974abe4c2af87d687936d918f"
+      "size": 22424,
+      "sha256": "c0569c23fcebe2c4662e2936fca7cdf1ff6c456b0795cc580c6dc3c869079333"
     },
     {
       "path": "网页资源/launch.ps1",

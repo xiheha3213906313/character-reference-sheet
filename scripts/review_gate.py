@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import sys
 
-from check_delivery import ROLES, png_size, within
+from check_delivery import ROLES, canvas_image_data, png_size, within
 
 GROUPS = {"identity", "design", "look", "native_quality", "reduced_quality", "background"}
 DEPENDENCIES = {"head": (), "front": ("head",), "back": ("front",), "left": ("front", "back")}
+LOOK_ASPECTS = {"color_style", "lighting", "framing", "head_pose", "gaze", "expression"}
 
 
 def digest(path):
@@ -33,7 +34,129 @@ def background_sample_valid(rgb, mode):
     return rgb==[255,255,255] if mode=='exact_white' else min(rgb)>=245 and max(rgb)-min(rgb)<=8
 
 
-def check(record, root, stage=None, before=None):
+def selection_image(reference, root, role):
+    """Read a retained PNG or its candidate data after delivery packing."""
+    if not isinstance(reference, dict):
+        raise ValueError('三选一输出引用须为对象')
+    expected = reference.get('sha256')
+    if reference.get('file'):
+        path = within(root, reference['file'])
+        png_size(path)
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise ValueError('三选一候选完整解码需要Pillow；不能只按文件头宣称有效') from exc
+        with Image.open(path) as image:
+            if image.format != 'PNG':
+                raise ValueError('三选一输出须为PNG')
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+        actual = digest(path)
+    else:
+        manifest_path = within(root, reference.get('canvas_manifest'))
+        if manifest_path.name != '画布清单.json' or manifest_path.parent.name != '网页资源':
+            raise ValueError('三选一需引用规范的画布清单')
+        candidates = read(manifest_path).get('candidates', [])
+        matches = [item for item in candidates if item.get('id') == reference.get('candidate_id')]
+        if len(matches) != 1 or matches[0].get('view') != {'left': 'side'}.get(role, role):
+            raise ValueError('三选一候选不存在、重复或视图不符')
+        actual = hashlib.sha256(canvas_image_data(manifest_path.parent.parent, matches[0])).hexdigest()
+    if actual != expected:
+        raise ValueError('三选一候选图片已变化')
+    return actual
+
+
+def check_selection(selection, root, role, current_hash, goals):
+    if selection.get('schema_version') != 1:
+        raise ValueError('三选一记录schema_version须为1')
+    stages = selection.get('stages')
+    if not isinstance(stages, dict):
+        raise ValueError('三选一记录stages须为对象')
+    data = stages.get(role)
+    if not isinstance(data, dict):
+        raise ValueError(f'{role}缺少三选一记录')
+    recipe = data.get('recipe')
+    if not isinstance(recipe, dict):
+        raise ValueError(f'{role}缺少共同调用配置')
+    prompt = within(root, recipe.get('prompt_file'))
+    if not prompt.read_text(encoding='utf-8-sig').strip() or digest(prompt) != recipe.get('prompt_sha256'):
+        raise ValueError(f'{role}三选一提示词缺失或已变化')
+    nonempty(recipe.get('tool'), f'{role}三选一工具')
+    if not isinstance(recipe.get('parameters'), dict):
+        raise ValueError(f'{role}三选一可控参数须为对象')
+    inputs = recipe.get('inputs')
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError(f'{role}三选一缺少有序输入')
+    for entry in inputs:
+        if not isinstance(entry, dict):
+            raise ValueError('三选一输入须为对象')
+        nonempty(entry.get('purpose'), '三选一输入用途')
+        raw = entry.get('file')
+        nonempty(raw, '三选一输入文件')
+        path = Path(raw) if Path(raw).is_absolute() else within(root, raw)
+        if digest(path) != entry.get('sha256'):
+            raise ValueError(f'{role}三选一输入已变化')
+    calls = data.get('calls')
+    required_calls = data.get('required_calls', 3)
+    if type(required_calls) is not int or not 1 <= required_calls <= 3:
+        raise ValueError(f'{role}required_calls须为1..3')
+    if required_calls != 3:
+        nonempty(data.get('user_override_reason'), f'{role}用户明确限制候选数量的依据')
+    if not isinstance(calls, list) or len(calls) != required_calls:
+        raise ValueError(f'{role}需{required_calls}次真实调用记录')
+    ids, selected_hash = set(), None
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict):
+            raise ValueError('三选一调用须为对象')
+        identifier = call.get('id')
+        nonempty(identifier, '三选一调用id')
+        if identifier in ids:
+            raise ValueError(f'{role}独立调用id重复')
+        ids.add(identifier)
+        if any(call.get(key) != recipe.get(key) for key in ('prompt_sha256', 'inputs', 'tool', 'parameters')):
+            raise ValueError(f'{role}/{identifier}不是相同提示词、有序输入、工具和参数')
+        evidence = within(root, call.get('evidence_file'))
+        if not evidence.stat().st_size or digest(evidence) != call.get('evidence_sha256'):
+            raise ValueError(f'{role}/{identifier}调用证据缺失或已变化')
+        output_hash = selection_image(call.get('output'), root, role)
+        verdicts = call.get('checks')
+        if (not isinstance(verdicts, dict) or set(verdicts) != set(goals)
+                or any(value not in ('pass', 'fail', 'pending') for value in verdicts.values())):
+            raise ValueError(f'{role}/{identifier}三选一逐项结论遗漏或无效')
+        passed = all(value == 'pass' for value in verdicts.values())
+        if call.get('result') != ('pass' if passed else 'fail'):
+            raise ValueError(f'{role}/{identifier}总体结论与逐项结论不符')
+        nonempty(call.get('observation'), f'{role}/{identifier}三选一实际观察')
+        if index == 0 and not passed:
+            raise ValueError(f'{role}追加两次调用前的首张必须合格')
+        if identifier == data.get('selected_call'):
+            if not passed:
+                raise ValueError(f'{role}不能选择未通过的候选')
+            selected_hash = output_hash
+    if selected_hash is None:
+        raise ValueError(f'{role}所选调用不存在')
+    nonempty(data.get('selection_reason'), f'{role}具体选择依据')
+    processing = data.get('processing', [])
+    if not isinstance(processing, list):
+        raise ValueError(f'{role}后处理链须为数组')
+    for step in processing:
+        if not isinstance(step, dict) or step.get('input_sha256') != selected_hash:
+            raise ValueError(f'{role}后处理链输入版本不连续')
+        path = within(root, step.get('record_file'))
+        if digest(path) != step.get('record_sha256'):
+            raise ValueError(f'{role}后处理记录已变化')
+        provenance = read(path)
+        if ((provenance.get('input_sha256') or provenance.get('source_sha256')) != selected_hash
+                or provenance.get('output_sha256') != step.get('output_sha256')):
+            raise ValueError(f'{role}后处理旁录与版本链不符')
+        nonempty(step.get('output_sha256'), f'{role}后处理输出哈希')
+        selected_hash = step['output_sha256']
+    if selected_hash != current_hash:
+        raise ValueError(f'{role}当前图不是三选一所选版本或其已记录后处理结果')
+
+
+def check(record, root, stage=None, before=None, expected_task_mode=None):
     root = root.resolve()
     errors, checked, active, finished, sampled = [], [], set(), set(), []
     if stage is not None and before is not None:
@@ -63,13 +186,19 @@ def check(record, root, stage=None, before=None):
         raise ValueError("底稿scope无效")
     if scope == "single_stage" and (stage is None or before is not None):
         raise ValueError("单阶段记录只支持--stage，不批准完整套或下游制作")
+    task_mode = brief.get('task_mode', 'production' if scope == 'full_sheet' else 'existing_review')
+    if task_mode not in ('production', 'existing_review'):
+        raise ValueError('task_mode须为production或existing_review；仅生成试跑不批准验收')
+    if expected_task_mode is not None and task_mode != expected_task_mode:
+        raise ValueError('交付与验收底稿的task_mode不一致')
+    selection = None
     compiled = {}
     for role in ROLES if scope == "full_sheet" else (stage,):
         required_groups = GROUPS | ({"spatial"} if role in ("back", "left") else set())
         plan = plans.get(role)
         if not isinstance(plan, list) or not plan:
             raise ValueError(f"{role}缺少固定的验收目标")
-        goals, observed_groups = {}, set()
+        goals, observed_groups, aspects = {}, set(), set()
         for goal in plan:
             if not isinstance(goal, dict):
                 raise ValueError(f"{role}底稿检查项不是对象")
@@ -83,11 +212,20 @@ def check(record, root, stage=None, before=None):
                 raise ValueError(f"{role}/{key}缺少有效来源")
             goals[key] = goal
             observed_groups.add(goal["group"])
+            if goal['group'] == 'look':
+                aspect = goal.get('aspect')
+                if aspect not in LOOK_ASPECTS or aspect in aspects:
+                    raise ValueError(f'{role}呈现项须有独立且不重复的aspect；旧底稿需补齐')
+                aspects.add(aspect)
         if observed_groups != required_groups:
             raise ValueError(f"{role}底稿未覆盖{sorted(required_groups-observed_groups)}")
+        required_aspects = {'color_style', 'lighting', 'framing'} | ({'head_pose', 'gaze', 'expression'} if role in ('head', 'front') else set())
+        if not required_aspects <= aspects:
+            raise ValueError(f'{role}底稿缺少独立呈现项{sorted(required_aspects-aspects)}')
         compiled[role] = goals
 
     def approve(role):
+        nonlocal selection
         if role in finished:
             return
         if role in active:
@@ -104,6 +242,13 @@ def check(record, root, stage=None, before=None):
         if data.get("decision") != "approved":
             raise ValueError(f"{role}状态为{data.get('decision', 'unreviewed')}，不能使用为合格上游")
         goals = compiled[role]
+        if scope == 'full_sheet' and task_mode == 'production':
+            if selection is None:
+                selection_path = within(root, record.get('selection_file', '制作记录/三选一记录.json'))
+                if digest(selection_path) != record.get('selection_sha256'):
+                    raise ValueError('三选一记录缺失或已变化，需绑定selection_sha256')
+                selection = read(selection_path)
+            check_selection(selection, root, role, image_hash, goals)
         checks = data.get("checks")
         if not isinstance(checks, list) or any(not isinstance(item, dict) for item in checks):
             raise ValueError(f"{role}逐项观察记录缺失")
@@ -139,14 +284,10 @@ def check(record, root, stage=None, before=None):
                     raise ValueError(f'{role}/{key}背景策略无效')
                 mode=policy['mode']
                 if mode == 'transparent':
-                    if policy.get('alpha_source') not in ('model', 'tool_extraction', 'python_matting'):
+                    if policy.get('alpha_source') not in ('model', 'tool_extraction'):
                         raise ValueError(f'{role}/{key}需记录真实Alpha来源')
                     if not {'light', 'dark'} <= {a.get('background') for a in evidence if a.get('purpose') == 'source_background'}:
                         raise ValueError(f'{role}/{key}缺少实际查看的深浅底Alpha证据')
-                    if policy.get('alpha_source') == 'python_matting':
-                        provenance = read(within(root, policy.get('provenance_file')))
-                        if provenance.get('operation') != 'python_background_matting' or provenance.get('output_sha256') != image_hash:
-                            raise ValueError(f'{role}/{key}抠像来源记录与当前图不符')
                 if mode=='near_white_rgb_fallback':
                     nonempty(policy.get('reason'),f'{role}/{key}Alpha能力降级依据')
                     if policy.get('alpha_limitation') not in ('input','output','both'):
@@ -204,6 +345,7 @@ def check(record, root, stage=None, before=None):
             active.clear()
     return {"scope": "review_records_and_versions", "model_visual_checks": False,
             "mode": "before_stage" if before else "stage" if stage else "full_sheet",
+            "task_mode": task_mode,
             "background_sample_pixels_verified": sampled,
             "recorded_approval_valid": not errors, "before": before, "stage": stage,
             "checked": checked, "errors": errors}

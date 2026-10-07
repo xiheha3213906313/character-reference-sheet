@@ -24,7 +24,7 @@
 
 ```json
 {
-  "scope":"full_sheet",
+  "scope":"full_sheet","task_mode":"production",
   "sources":{"primary":{"file":"参考/主参考.png","sha256":"实际哈希"}},
   "checks":{"head":[
     {"id":"本任务身份关系","group":"identity","source_ids":["primary"],"target":"实际可观察目标"}
@@ -35,6 +35,10 @@
 这里只示范一个检查项；完整表按真实任务补足各分组：`identity`、`design`、`look`、`native_quality`、`reduced_quality`、`background`；背面和侧面另有`spatial`。完整套的四个视图均列目标。原图只在局部清楚时写其有效用途，采用背面方案另作为已记录来源，不冒充摄影事实。
 
 `sources` 分别登记有效原始细节图/裁切、图片选用文档及指定呈现来源的真实路径与哈希；`source_ids` 指向当前检查实际需要的来源，不将另一角色的呈现图登记为身份/服装依据。默认文字呈现目标直接写入 `target`，来源可引用固定的制作文档，不要求额外示例图片。`look` 分开列本色/画风、光照、构图、适用头部姿态/镜头注视及中性表情项：本色/画风对原素材，其余对本轮呈现目标。特写的构图、头部姿态、注视目标和表情必须各列一项，不合并为“呈现符合”；观察及判定方法见 [呈现验收](presentation.md#呈现验收)。关键纹样、材料及连接在相应分组各列具体项，保持细节输入用途到检查项的对应关系，不能用一个“设计符合”概括全部。图片选用文档、文字底稿与脚本均不能替代回看真实细节图。
+
+每条 `look` 目标增加单一 `aspect`：`color_style`（本色/画风）、`lighting`（光照）、`framing`（构图）、`head_pose`（头态）、`gaze`（视线）、`expression`（表情）。同一视图每种aspect各一条；特写/正面须覆盖六项，背面/侧面至少前三项，其他项按可见内容补充。具体细节仍在目标与观察中展开。用户另指定或合理不可见时写明相应目标及依据，不能省略必查项。旧底稿需补齐并实际复检，不能自动填为通过。
+
+`task_mode:"production"` 用于常规整套制作（完整套省略时也按production检查）；评审既有图片明确写 `"existing_review"`，完整交付清单每套也写相同的 `task_mode`。单张评审默认existing_review，不强制三选一。只生成试跑和未验收既有图片打包使用未验收状态及文件检查，不调用批准门槛，不因跳过三选一而升级图片。
 
 ## 看图后填写当前状态
 
@@ -60,13 +64,15 @@
 
 按 [输入细节逐项对照](visual-verification.md#输入细节逐项对照) 实际打开每组对应部位，再写该项观察与结论；缺对照、未看或看不清的关键细节不能预填通过。特写构图看候选整幅，按 [位置与占比](presentation.md#特写位置与占比) 记录头部主体性、身体占比及是否明显偏下；面部合理偏移可通过，不要求中心测量。有用户指定镜头样例时可补整幅并排，不能仅用重新居中的脸部裁切。合理不可见的事实注明范围与其他视图证据；确定细节错误时撤销该版本及受影响下游的批准。
 
-`viewed:true` 是执行者对实际打开图像的记录，脚本不证明这件事发生过，更不判定观察正确。透明阶段用 `background_policy:{"mode":"transparent","alpha_source":"model或tool_extraction或python_matting"}`；透明空白样本写 `empty_background_samples:[{"xy":[x,y],"alpha":0,"confirmed_empty":true}]`，背景证据包含实际查看的深浅底PNG，分别标 `background:"dark"` / `"light"`。本地抠像另用 `provenance_file` 指向与当前输出哈希匹配的真实抠像旁录，边缘/主体/材料仍须看图。
+`viewed:true` 是执行者对实际打开图像的记录，脚本不证明这件事发生过，更不判定观察正确。透明阶段用 `background_policy:{"mode":"transparent","alpha_source":"model或tool_extraction"}`：model表示生成时直接输出Alpha，tool_extraction表示用现行四种方法本地抠像。透明空白样本写 `empty_background_samples:[{"xy":[x,y],"alpha":0,"confirmed_empty":true}]`，背景证据包含实际查看的深浅底PNG，分别标 `background:"dark"` / `"light"`。本地抠像保存真实输入、方法/参数和输出哈希旁录，边缘/主体/材料仍须看图。
 
 白底阶段背景检查另写 `empty_background_samples:[{"xy":[x,y],"rgb":[255,255,255],"confirmed_empty":true}]`，RGB填真实源PNG空背景采样，不能采到主体或抄提示词。用户另要求严格纯白时写 `background_policy:{"mode":"exact_white"}`；实际不支持Alpha或本次透明输出不可用的RGB降级阶段可写 `{"mode":"near_white_rgb_fallback","alpha_limitation":"input或output或both","reason":"实际能力限制依据"}` 并在底稿标明近白目标。须视觉接近中性白；不能为让失败通过虚构能力限制。
 
 证据用途按分组记录：身份/设计/呈现为`reference_compare`，原生质量为`native_detail`，缩小表面为`reduced_view`，背景源图为`source_background`，空间关系为`cross_view`。默认文字呈现的 `reference_compare` 可以是实际查看的候选全图/适用局部与固定文字目标的核对记录，注明文字依据，不伪造图片并排；身份与服饰细节仍须真实图片对照。身份/设计/空间项还写`comparison_basis`说明主体尺度或实际关系依据。这些字段使不适用/缺失的检查可被拦截，不表示脚本能验证判断正确。
 
 完整套依赖：特写无上游；正面引用合格特写；背面引用合格正面；侧面引用合格正面及背面。正常制作先完成本视图的 [三选一](quality-and-revision.md#合格视图三选一)，再把所选版本写为当前 `approved`；首张合格是追加两次独立调用的触发条件，还不是结束本阶段的条件。`dependencies` 绑定上游三选一后的当前哈希；不能先沿用首张制作下游，再无视依赖地替换上游。三张的逐项结论及选择依据放 `三选一记录.json`，当前状态绑定所选图。实际工具输入及用途另记，不能用记录替代真正传图。单张评审/返工用 `scope:"single_stage"`，只记录本次范围和实际基准，不能用其结果宣称整套通过或跳过完整制作的依赖。
+
+production完整套的当前状态还须包含 `selection_file:"制作记录/三选一记录.json"` 与该文件的 `selection_sha256`。进入下游时只检查其已完成上游的选择；交付前检查四个视图。所选候选与当前PNG不同（例如抠像）时保存连续输入/输出哈希和真实后处理旁录。格式见 [三选一记录接口](selection-record.md)。只有结构和哈希核验成功不证明真实调用、实际查看或选择判断正确。
 
 ## 调用前和交付前检查
 
@@ -80,4 +86,4 @@ python "<技能目录>/scripts/review_gate.py" "<验收状态.json>" --root "<�
 
 输出明确 `scope:review_records_and_versions` 和 `model_visual_checks:false`。脚本只能查记录完整性和版本，不能识别变脸、改款、空间矛盾或脏点。不能把它的批准记录核验当成独立视觉认证；真实视觉判断仍由执行者承担。
 
-有Pillow时脚本同时读取记录坐标的真实PNG像素，按当前透明/严格纯白/能力降级近白策略核查实际Alpha或RGB及采样自报，输出实际核查的视图；没有Pillow时只核查样本记录，需执行者做等价检查。空白坐标的选择是否正确、背景整体是否均匀仍须看图判断。
+有Pillow时脚本同时读取记录坐标的真实PNG像素，按当前透明/严格纯白/能力降级近白策略核查实际Alpha或RGB及采样自报，输出实际核查的视图；没有Pillow时既有图片评审只核查样本记录，需执行者做等价检查。production的候选完整解码需要Pillow，缺少时明确报错，不降低为文件头检查。空白坐标的选择是否正确、背景整体是否均匀仍须看图判断。

@@ -5,7 +5,7 @@ Coordinates and mask files describe the TARGET view; only source alpha is mirror
 Requires Python 3.10+ and Pillow. No model download, GPU or detector is required.
 """
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 import PIL
 import argparse, hashlib, json, math
 
@@ -75,15 +75,20 @@ def render(manifest, dest):
     if len(set(ids))!=len(ids):raise ValueError('Duplicate part ID')
     masks={x['id']:shape_mask(x['shape'],size,base) for x in parts}
     for x in parts:
-        if not 1<=x['depth_value']<=255:raise ValueError('Foreground depth values must be 1..255')
+        if type(x['depth_value']) is not int or not 1<=x['depth_value']<=255:raise ValueError('Foreground depth values must be integers in 1..255')
         if x.get('expected_count',1)<1:raise ValueError('Invalid expected part count')
         for far in x.get('nearer_than',[]):
             if far not in masks or x['depth_value']<=next(v['depth_value'] for v in parts if v['id']==far):
                 raise ValueError('Depth values conflict with declared local overlap')
+    body_depth=c.get('body_depth',130)
+    if type(body_depth) is not int or not 1<=body_depth<=255:
+        raise ValueError('Body depth must be an integer in 1..255')
     guide=Image.new('L',size,255);guide.paste(c.get('body_gray',160),mask=body)
-    depth=Image.new('L',size,0);depth.paste(c.get('body_depth',130),mask=body)
+    depth=Image.new('L',size,0);depth.paste(body_depth,mask=body)
     for x in sorted(parts,key=lambda x:x['depth_value']):
-        mask=masks[x['id']];depth.paste(x['depth_value'],mask=mask)
+        mask=masks[x['id']]
+        layer=Image.new('L',size,0);layer.paste(x['depth_value'],mask=mask)
+        depth=ImageChops.lighter(depth,layer)
         if x.get('show_in_guide',True):guide.paste(x.get('guide_gray',32),mask=mask)
     dest=Path(dest).resolve()
     if dest.exists():raise FileExistsError('Use a new version directory; do not overwrite frozen guides')

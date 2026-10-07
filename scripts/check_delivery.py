@@ -115,11 +115,20 @@ def canvas_image_data(folder, entry):
     if payload.get('id') != entry.get('id') or not str(payload.get('data', '')).startswith('data:image/png;base64,'):
         raise ValueError('候选加载脚本身份或数据格式不符')
     data = base64.b64decode(payload['data'].split(',', 1)[1], validate=True)
-    if len(data) < 24 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
-        raise ValueError('候选加载脚本未保存完整PNG')
     if hashlib.sha256(data).hexdigest() != entry.get('sha256'):
         raise ValueError('候选加载数据与账本哈希不符')
-    if list(struct.unpack('>II', data[16:24])) != [entry.get('width'), entry.get('height')]:
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format != 'PNG':
+                raise ValueError('不是PNG编码')
+            size = image.size
+            image.verify()
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+    except (OSError, ValueError, SyntaxError) as exc:
+        raise ValueError('候选PNG无法完整解码：' + script_path + '：' + str(exc)) from exc
+    if list(size) != [entry.get('width'), entry.get('height')]:
         raise ValueError('候选加载数据尺寸与账本不符')
     return data
 
@@ -487,7 +496,10 @@ def check(manifest, root, force_preview=False, files_only=False):
                     raise ValueError("套图不是对象")
                 review_path = within(root, outfit.get("review_file"))
                 review_record = read_reviews(review_path)
-                result = check_reviews(review_record, root)
+                task_mode = outfit.get('task_mode', 'production')
+                if task_mode not in ('production', 'existing_review'):
+                    raise ValueError('task_mode须为production或existing_review；仅生成/未验收打包用--files-only')
+                result = check_reviews(review_record, root, expected_task_mode=task_mode)
                 if not result["recorded_approval_valid"]:
                     raise ValueError("；".join(result["errors"]))
                 reviewed = {entry["role"]: entry for entry in result["checked"]}

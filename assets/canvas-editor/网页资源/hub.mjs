@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const EDITOR=fs.existsSync(path.join(HERE,'编辑画布.html'))?path.join(HERE,'编辑画布.html'):path.join(HERE,'..','编辑画布.html');
 export const PORT=18743, ORIGIN=`http://127.0.0.1:${PORT}`, APP='character-canvas-v2';
-export const REVISION=47;
+export const REVISION=48;
 export const CACHE=process.env.CHARACTER_CANVAS_CACHE||path.join(os.tmpdir(),'CharacterSheetCanvas','cache');
 export const STATE=process.env.CHARACTER_CANVAS_STATE||path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'.cache'),'CharacterSheetCanvas');
 const ORT_VERSION='1.30.0', RUNTIME_FILES=['ort.all.min.mjs','ort-wasm-simd-threaded.jsep.mjs','ort-wasm-simd-threaded.jsep.wasm'];
@@ -166,7 +166,6 @@ export async function startHub({port=PORT,fetcher=fetchDownload}={}){
    if(!['GET','HEAD'].includes(req.method)){json(res,405,{error:'不支持此操作'});return;}
    if(pathname==='/'||pathname==='/编辑画布.html'){await sendFile(req,res,EDITOR,'text/html; charset=utf-8');return;}
    const project=pathname.match(/^\/p\/([a-f0-9]{20})\/?$/);if(project&&projects.has(project[1])){await sendFile(req,res,projects.get(project[1]),'text/html; charset=utf-8');return;}
-   const model=pathname.match(/^\/models\/(lite512|lite1024)\.onnx$/);if(model&&states[model[1]].status==='ready'){await sendFile(req,res,path.join(MODEL_DIR,model[1]+'.onnx'),'application/octet-stream',true);return;}
    const runtime=pathname.match(/^\/runtime\/([^/]+)$/);if(runtime&&RUNTIME_FILES.includes(runtime[1])&&await runtimeReady()){await sendFile(req,res,path.join(RUNTIME,runtime[1]),runtime[1].endsWith('.wasm')?'application/wasm':'text/javascript',true);return;}
    if(pathname==='/favicon.ico'){res.writeHead(204);res.end();return;}
    json(res,404,{error:'文件不存在'});

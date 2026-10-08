@@ -92,6 +92,12 @@ def ratio(value):
         raise ValueError("比例应为正整数形式，例如3:4")
 
 
+def aspect_matches(size, target):
+    w, h = size
+    rw, rh = target
+    return abs(w * rh - h * rw) <= 2 * max(rw, rh)
+
+
 def png_size(path):
     with path.open("rb") as stream:
         header = stream.read(24)
@@ -286,7 +292,7 @@ def check(manifest, root, force_preview=False, files_only=False):
                 w, h = png_size(path)
                 rw, rh = head_ratio if role == "head" else body_ratio
                 # Allow at most one pixel of integer-dimension rounding.
-                if abs(w * rh - h * rw) > max(rw, rh):
+                if not aspect_matches((w, h), (rw, rh)):
                     raise ValueError(f"{w}×{h}不符合{rw}:{rh}（允许1像素取整误差）")
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 from PIL import Image
@@ -499,8 +505,9 @@ def check(manifest, root, force_preview=False, files_only=False):
                 task_mode = outfit.get('task_mode', 'production')
                 if task_mode not in ('production', 'existing_review'):
                     raise ValueError('task_mode须为production或existing_review；仅生成/未验收打包用--files-only')
-                result = check_reviews(review_record, root, expected_task_mode=task_mode)
-                if not result["recorded_approval_valid"]:
+                review_root = review_path.parent.parent
+                result = check_reviews(review_record, review_root, expected_task_mode=task_mode)
+                if not result["record_integrity_valid"]:
                     raise ValueError("；".join(result["errors"]))
                 reviewed = {entry["role"]: entry for entry in result["checked"]}
                 folder = within(root, outfit.get("folder"))
@@ -512,6 +519,11 @@ def check(manifest, root, force_preview=False, files_only=False):
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 review_errors.append(f"{outfit.get('name','套图') if isinstance(outfit,dict) else '套图'}/visual_record：{exc}")
     return {"scope": "files_and_record_integrity", "model_visual_checks": False,
+            "file_integrity": "pass" if not errors else "fail",
+            "record_integrity": ("pass" if not review_errors else "fail") if require_review else "not_checked",
+            "visual_assessment": ("selected_without_approval" if any(
+                item["result"]["visual_assessment"] == "selected_without_approval" for item in reviews) else "recorded_only")
+                if require_review and not review_errors else "not_approved",
             "check_mode": "files_only" if files_only else "full_delivery",
             "delivery_location": delivery_location,
             "recorded_delivery_valid": not files_only and not errors and not review_errors,

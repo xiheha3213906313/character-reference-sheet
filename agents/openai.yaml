@@ -1,4 +1,4 @@
 interface:
   display_name: "通用人物设定图制作"
   short_description: "制作并验收人物四视图，保留全部候选，交付总览和本地网页编辑器"
-  default_prompt: "使用 $character-reference-sheet 根据我的参考素材提取角色特征，制作并逐项验收人物设定图，保留全部候选并交付本地网页编辑器。"
+  default_prompt: "使用 $character-reference-sheet 的固定制作接口，根据我的参考素材制作人物设定图。每阶段先看对比拼图简单自评，再独立复核；批准后并行追加两次。脚本生成记录、选优拼图和整套交付。"

@@ -1,30 +1,47 @@
 # 三选一记录接口
 
-只在常规完整制作的production验收时读取。流程和观察标准见 [三选一](quality-and-revision.md#合格视图三选一)。记录JSON的 `schema_version:1`，`stages` 按 `head/front/back/left` 保存各阶段；上游检查允许后续视图尚未完成。所有路径相对验收项目根目录，recipe的原始输入也可用实际绝对路径。
+普通新制作由[制作接口](production-api.md#rank)自动生成三张候选同屏拼图并写本记录；模型仅提交所选编号、拼图版本和一句理由，不手写机械结构。首张批准后两次追加同批并行，全部返回后一次登记，中间不看图。
 
-每个阶段包含：
+## v2：验收与排序分开
 
-- `recipe`：`prompt_file`、`prompt_sha256`、`inputs`（有序数组，每项含file、sha256、purpose）、`tool`、`parameters`（对象）。完整提示词保存为非空文本文件，哈希按文件原始字节计算；参数如实记录可控值。
-- `calls`：恰好三项，按实际先后排列；每项的 `id` 非空且不重复，复制共同配置的prompt_sha256、inputs、tool、parameters，并指向真实 `evidence_file` / `evidence_sha256` 调用证据。证据可以是保存的真实请求/结果记录或日志，不补造缺失的历史调用。
-- 用户明确限制数量时，阶段可写 `required_calls:1` 或2并填写 `user_override_reason` 保存真实要求，此时calls恰好为该数量，其他检查不变；未写时默认三次。不能自行用数量例外绕过常规三选一。
-- 每次调用的 `output` 指向完整候选PNG或已归档候选，并包含其sha256；`checks` 为本阶段所有固定目标id到pass/fail/pending的映射，`result` 只有全部pass才是pass，否则为fail，`observation` 保存实际观察。首张及所选候选必须pass；后两张允许fail，不强制补生成。
-- `selected_call` 指向实际所选调用id，`selection_reason` 写具体选择依据。
-- `processing` 可省略或为空；选定后抠像、导出或已授权返工造成哈希改变时，每步含input_sha256、output_sha256、record_file、record_sha256。真实旁录也需含input_sha256（或source_sha256）和output_sha256，前一步输出接下一步输入，最终输出必须等于当前验收PNG哈希。候选及旁录随制作记录保留。
+内部`三选一记录.json`使用 `schema_version:2`、`rules_version:2`；整合解析入口`制作记录.json`只支持当前格式3，见[记录契约](production-record-format.md)。内部选择记录，`stages` 按 `head/front/back/left` 保存。上游核查允许后续阶段尚未完成；每阶段绑定自己的记录，不因新增后续阶段重验上游。流程见 [三选一](quality-and-revision.md#合格视图三选一)，机械字段优先由 [流程助手](review-workflow.md) 生成。
 
-输出引用二选一：
+每阶段分别保存以下真实信息：
 
-```json
-{"file":"候选/000001_特写.png","sha256":"实际候选哈希"}
-```
+- **成功配方**：首张成功调用的完整提示词文件与哈希、有序输入/用途/哈希、工具、可控参数。后两次完全复用，不能加入已有输出或偷偷改词换图。原始输入允许真实绝对路径，其他项目路径相对项目根目录。
+- **实际调用**：按发生顺序保留调用id、真实请求/结果证据与哈希、成功输出或实际工具失败。首张批准后固定追加两次调用，失败不伪造成输出，也不因效果差/调用失败擦除记录后补抽。合格首张以前的失败尝试仍保留实际历史。
+- **首张复核**：绑定首张、固定阶段目标、有效上游和证据版本，记录实际复核模式、明确已看的证据及逐项观察/结果。只有完整通过才能触发追加两次。
+- **排序**：制作模型自己比较，接近时保留合格首张，仅明显改善才偏好新增候选。保存 `preferred_call` 和简短具体的 `selection_reason`。追加候选不需要 `checks` 或 `result`，落选不等于视觉失败；没有复核就是未验收。
+- **最终复核与采用**：偏好首张时复用其有效批准；偏好新增候选时仅复核它。通过则采用，失败或补证后仍待核实则记录回退原因并采用仍有效的首张，不转而复核另一张、不追加生成。记录最终所选调用及对应完整复核，不能把偏好直接写成批准。
+- **后处理链**：所选图与当前PNG不同则保存每步实际输入/输出哈希及旁录，连续链末端等于当前图。普通处理按当前图重新检查；脚本证明可见RGBA完整保留的PNG重编码/透明扩边，可复用原质量结论并由制作模型简查构图和深浅底。旁录本身不代替核验。
 
-交付时默认候选已在画布数据中，使用：
+常规三张成功时，首张与两次追加均有真实输出；追加工具失败时保留调用事实及可用首张，比较实际可用候选；门禁标为 `selection_status:"limited_tool_error"`，可在其余批准记录有效时继续，但必须报告实际限制，不能宣称三张成功或完成完整三张比较。用户明确限制数量时用 `required_calls` 和 `user_override_reason` 记录真实要求，不自行设数量例外。
 
-```json
-{"canvas_manifest":"网页资源/画布清单.json","candidate_id":"head-实际候选哈希","sha256":"实际候选哈希"}
-```
+当前状态保存 `selection_file`，每阶段的 `selection_sha256` 仅绑定该阶段记录；`target_sha256` 绑定本阶段目标及所用来源，上游依赖绑定其当前图片和批准版本。由助手生成、门禁重算，不手工编辑哈希来恢复视觉批准。输出可引用原始候选文件或画布完整候选数据，文件缺失时按当前哈希读取规范画布数据；网页候选保留真实未验收/失败/通过状态，不强制把落选图标为失败。
 
-画布清单路径可带套图子目录，candidate_id须对应此视图，左侧面在网页中使用side。核验器读取对应完整图片数据，不把仅存在的账本条目当作图片有效。
 
-当前 `验收状态.json` 用selection_file及selection_sha256绑定整份选择记录。增加后续阶段或修改记录后更新此哈希；图片、提示词、输入、调用证据或后处理记录变化时，复检受影响内容后再更新。
+v2阶段实际结构由助手维护，CLI输入见 [配置接口](review-workflow.md#流程助手与配置)：
 
-既有图片评审在底稿明确task_mode为existing_review，完整交付清单也保持同一模式；不要求不存在的生成历史。单张任务不强制完整套三选一。未验收打包和仅生成试跑仅检查文件，不使用批准门槛。记录完整和版本一致仍不能证明执行者实际进行了调用或正确看图。
+| 字段 | 保存内容 |
+|---|---|
+| `recipe` | 成功配方及快照哈希；existing_review可为null，不伪造生成历史 |
+| `attempts` | 按真实事件顺序登记的first/extra调用，含id、event、recipe_sha256、证据引用和output或error |
+| `reviews` | 以调用id为键的完整/部分视觉复核，含原始报告与包的版本绑定；落选追加图无需条目 |
+| `baseline_call/baseline_approval_event` | 实际合格首张及其批准事件；所有extra事件必须发生在批准之后 |
+| `required_calls/user_override_reason/reviewer_policy` | 本组额度、真实用户例外和复核策略 |
+| `ranking` | 一次固定的preferred_call、selection_reason、viewed_call_ids、实际reviewer |
+| `selected_call` | 最终采用的偏好图或有效首张；与ranking分开 |
+| `processing/processing_reviews` | 连续后处理步骤及以处理id为键的复核；普通处理重新复核；无损证明加制作模型构图/背景检查可继承有效批准 |
+| `attempts[].self_check` | 制作模型简单自评的真实报告、哈希、结果和事件；pass后才交子代理，落选追加图无需此项 |
+| `generation_limit` | 默认六次，用户可明确另定；追加、编辑和工具失败均跨重新prepare累计。重复问题停止门槛可提前耗尽 |
+| `limit_selection` | 实际达到上限后由制作模型自己选优，含所选id、全部可用候选已看列表、理由、实际模式、真实报告与累计历史绑定。此路径取消合格评价，允许未验收选图进入下游 |
+
+`验收状态.json`的阶段记录由所选有效复核构建，含`target_sha256`、`dependencies`（上游dependency_binding_sha256）、`review_sha256`、本阶段`selection_sha256`和`binding_sha256`。`binding_sha256`绑定当前图片、阶段目标与有效依赖；`dependency_binding_sha256`绑定已批准的人物内容谱系，只有经过真实无损证明和构图/背景检查的处理才能保持它不变；`review_sha256`另外绑定实际复核。不要自行猜测或修改这些值以绕过门禁。首次/补证原报告放`制作记录/复核报告/`，前次pending结论保留为`previous_review`。
+
+## 当前图片与画布数据
+
+工作记录的输出为 `{"file":"候选/000001_特写.png","sha256":"实际候选哈希"}`。交付后候选封装在 `网页资源/画布清单.json` 及对应数据中，门禁按同一视图与SHA-256读取完整原生PNG；显式引用可使用 `canvas_manifest/candidate_id/sha256`。左侧面在网页中使用side，不把仅存在的账本条目当作图片有效。
+
+既有图片用 `existing_review` 建立当前记录，不要求不存在的生成历史；未验收打包和只生成试跑仅检查文件。记录一致不能证明看图判断正确。
+
+生成上限选优是正常三选一的明确例外：不强制三张、合格首张或子代理完整检查表。所选图有仍有效的批准则复用；否则当前状态为 `selected_unreviewed`，视觉字段为 `selected_without_approval`；记录有效及允许下游不等于视觉通过。原先失败/待核实报告保留，制作模型可从归档历史选择实际最优图，路径、图片与依赖仍必须有效。

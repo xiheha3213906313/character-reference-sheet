@@ -6,8 +6,8 @@ import re
 import sys
 from pathlib import Path
 
-STAGES = {'head': '头部特写', 'front': '全身正面', 'back': '全身背面', 'left': '人物自身左侧全身'}
-EDIT_CLEAN = '保持画面色彩、细节干净，不要添加噪点、颗粒、污渍、褶皱。'
+import prompt_templates as templates
+from prompt_templates import STAGES, EDIT_CLEAN
 
 def text(value, name, optional=False):
     if not isinstance(value, str) or (not optional and not value.strip()):
@@ -15,9 +15,9 @@ def text(value, name, optional=False):
     return value.strip()
 
 def render(spec):
-    required = {'operation','stage','aspect_ratio','references','framing','identity',
-                'critical_constraints','allowed_changes','presentation','quality'}
-    optional = {'character_name','outfit','height_cm','baseline_reference','edit_target'}
+    required = {'operation','stage','references','identity','critical_constraints'}
+    optional = {'character_name','outfit','height_cm','baseline_reference','edit_target',
+                'allowed_changes','quality_notes','user_overrides','background_mode','background_fallback_reason','corrections'}
     if not isinstance(spec, dict) or not required <= spec.keys():
         raise ValueError(f'Missing spec fields: {sorted(required - set(spec) if isinstance(spec, dict) else required)}')
     if set(spec) - required - optional:
@@ -25,7 +25,13 @@ def render(spec):
     operation, stage = spec['operation'], spec['stage']
     if operation not in ('generate','edit') or stage not in STAGES:
         raise ValueError('operation must be generate/edit; stage must be head/front/back/left')
-    ratio = text(spec['aspect_ratio'], 'aspect_ratio')
+    background_mode = spec.get('background_mode', 'transparent')
+    if background_mode not in templates.BACKGROUNDS:
+        raise ValueError('background_mode must be transparent/white')
+    if background_mode == 'white':
+        text(spec.get('background_fallback_reason'), 'background_fallback_reason')
+    common = templates.common(stage, spec.get('user_overrides', {}), background_mode)
+    ratio = common['aspect_ratio']
     if not re.fullmatch(r'[1-9][0-9]*:[1-9][0-9]*', ratio):
         raise ValueError('aspect_ratio must be a positive ratio such as 3:4')
     refs = spec['references']
@@ -33,18 +39,47 @@ def render(spec):
         raise ValueError('references must be a nonempty ordered list')
     for i, ref in enumerate(refs,1):
         if (not isinstance(ref,dict) or not {'image','role'} <= ref.keys()
-            or set(ref)-{'image','role','kind'}):
-            raise ValueError(f'references[{i}] requires image and role; optional kind is file/provider')
+            or set(ref)-{'image','role','kind','guide','regions'}):
+            raise ValueError(f'references[{i}] requires image and role; optional kind, guide and regions')
         if ref.get('kind','file') not in ('file','provider'):
             raise ValueError(f'references[{i}].kind must be file/provider')
         text(ref['image'],f'references[{i}].image')
         text(ref['role'],f'references[{i}].role')
-    framing, presentation = spec['framing'], spec['presentation']
-    if not isinstance(framing,dict) or set(framing) != {'required','preferred'}:
-        raise ValueError('framing requires exactly required and preferred')
-    if not isinstance(presentation,dict) or set(presentation) != {'lighting','expression','background'}:
-        raise ValueError('presentation requires exactly lighting, expression, background')
-    allowed = spec['allowed_changes']
+        if 'guide' in ref:
+            if ref['guide'] not in templates.GUIDES:
+                raise ValueError(f'references[{i}].guide is unknown')
+            if ref['guide'] in ('back_silhouette', 'rear_design', 'front_material') and stage != 'back':
+                raise ValueError('back_silhouette/rear_design/front_material are only for the back stage')
+            if ref['guide'] == 'edit_annotation' and operation != 'edit':
+                raise ValueError('edit_annotation is only for an edit')
+        if 'regions' in ref:
+            if 'guide' in ref or not isinstance(ref['regions'], list) or len(ref['regions']) < 2:
+                raise ValueError('A collage requires separate regions and no whole-image guide')
+            region_ids = set()
+            for region in ref['regions']:
+                core = {'id', 'location', 'box', 'role', 'source_key'}
+                if not isinstance(region, dict) or not core <= region.keys() or set(region) - core - {'guide'}:
+                    raise ValueError('Each collage region requires id/location/box/role/source_key')
+                for field in ('id', 'location', 'role', 'source_key'):
+                    text(region[field], 'region.' + field)
+                if region['id'] in region_ids:
+                    raise ValueError('Duplicate collage region id')
+                region_ids.add(region['id'])
+                box = region['box']
+                if not isinstance(box, list) or len(box) != 4 or any(type(v) is not int for v in box) or not 0 <= box[0] < box[2] or not 0 <= box[1] < box[3]:
+                    raise ValueError('Invalid collage region box')
+                guide = region.get('guide')
+                if guide and (guide not in templates.GUIDES or stage != 'back' and guide in ('front_material', 'back_silhouette', 'rear_design')):
+                    raise ValueError('Invalid collage region guide for this stage')
+                if guide == 'edit_annotation' and operation != 'edit':
+                    raise ValueError('edit_annotation region is only for an edit')
+    corrections = spec.get('corrections', [])
+    if (not isinstance(corrections, list) or any(not isinstance(c, str) or c not in templates.CORRECTIONS for c in corrections)
+            or len(corrections) != len(set(corrections))):
+        raise ValueError('corrections must identify distinct supported fixed correction templates')
+    if 'gaze_up' in corrections and (stage not in ('head', 'front') or any(k in spec.get('user_overrides', {}) for k in ('framing_required',))):
+        raise ValueError('gaze_up requires a front-facing head/front framing without user framing override')
+    allowed = spec.get('allowed_changes', [])
     if not isinstance(allowed,list) or any(not isinstance(v,str) or not v.strip() for v in allowed):
         raise ValueError('allowed_changes must be a list of nonempty strings')
     constraints = spec['critical_constraints']
@@ -61,15 +96,18 @@ def render(spec):
         if isinstance(baseline,bool) or not isinstance(baseline,int) or not 1<=baseline<=len(refs):
             raise ValueError('edit requires a valid baseline_reference')
         lines.append(f"唯一编辑底图为图{baseline}。本次修复：{text(spec.get('edit_target'),'edit_target')}")
-    changes='；'.join(v.strip() for v in allowed) if allowed else '不改变已有视觉设计'
+    changes = '；'.join([templates.CHANGES[stage]] + [v.strip() for v in allowed]) if operation == 'generate' else ('；'.join(v.strip() for v in allowed) if allowed else '仅修复上述目标')
     lines.append(f'允许调整：{changes}；其余身份、设计、本色和材料保持原参考。')
-    lines.append('构图必须：'+text(framing['required'],'framing.required'))
-    preferred=text(framing['preferred'],'framing.preferred',optional=True)
+    lines.append('构图必须：'+common['framing_required'])
+    preferred=common['framing_preferred']
     if preferred: lines.append('在上述完整性条件下协调：'+preferred)
     lines.append('身份：'+text(spec['identity'],'identity'))
+    if stage == 'back':
+        lines.append('背面依据：' + templates.BACK_REFERENCE_RULE)
     ids=[]
     for constraint in constraints:
         core={'id','kind','source_indices','statement'}
+        optional_constraint = {'source_regions'}
         ext={'attachment','path','end_anchor','frame_behavior'}
         if not isinstance(constraint,dict) or not core<=constraint.keys():
             raise ValueError('Each critical constraint requires id/kind/source_indices/statement')
@@ -84,7 +122,7 @@ def render(spec):
             needed=core | (ext if visibility=='complete' else {'path','frame_behavior'})
         else:
             permitted=needed=core
-        if not needed<=constraint.keys() or set(constraint)-permitted:
+        if not needed<=constraint.keys() or set(constraint)-permitted-optional_constraint:
             raise ValueError(f'{kind} constraint requires {sorted(needed)}; permitted fields: {sorted(permitted)}')
         cid=text(constraint['id'],'constraint.id')
         if cid in ids: raise ValueError(f'Duplicate constraint id: {cid}')
@@ -93,7 +131,34 @@ def render(spec):
         if (not isinstance(indices,list) or not indices or len(set(indices))!=len(indices)
             or any(isinstance(i,bool) or not isinstance(i,int) or not 1<=i<=len(refs) for i in indices)):
             raise ValueError(f'{cid}: source_indices must identify actual ordered references')
-        source='、'.join(f'图{i}' for i in indices)
+        selectors = constraint.get('source_regions', [{'index': i} for i in indices])
+        if not isinstance(selectors, list) or not selectors or any(not isinstance(s, dict) or set(s) - {'index', 'region'} or type(s.get('index')) is not int or s['index'] not in indices for s in selectors):
+            raise ValueError(f'{cid}: invalid source_regions')
+        if set(s['index'] for s in selectors) != set(indices) or len({(s['index'], s.get('region')) for s in selectors}) != len(selectors):
+            raise ValueError(f'{cid}: source_regions must cover the actual source_indices once per region')
+        guides, labels = [], []
+        for selection in selectors:
+            i = selection['index']
+            ref = refs[i - 1]
+            if 'regions' in ref:
+                region = next((r for r in ref['regions'] if r['id'] == selection.get('region')), None)
+                if region is None:
+                    raise ValueError(f'{cid}: collage source must name its actual region')
+                guides.append(region.get('guide'))
+                labels.append(f"图{i}{region['location']}")
+            else:
+                if 'region' in selection:
+                    raise ValueError(f'{cid}: region used on an unpacked reference')
+                guides.append(ref.get('guide'))
+                labels.append(f'图{i}')
+        source='、'.join(labels)
+        if stage == 'back' and kind != 'shape' and all(g == 'back_silhouette' for g in guides):
+            raise ValueError(f'{cid}: 剪影只能支持外形比例；背面设计、材料、裙层或连接须引用实际后方证据，不能只引用正面剪影')
+        if stage == 'back' and kind != 'material' and all(g == 'front_material' for g in guides):
+            raise ValueError(f'{cid}: 正面原图仅能支持材料纹理和表面光影；身形引用剪影，后方具体设计引用后方依据或明确推断')
+        if stage == 'back' and kind not in ('shape', 'material') and all(
+                g in ('front_material', 'back_silhouette') for g in guides):
+            raise ValueError(f'{cid}: 正面原图与剪影均不提供背面具体服装设计答案')
         line=f"设计{cid}（{source}）：{text(constraint['statement'],cid+'.statement')}"
         if kind=='extent':
             if 'attachment' in constraint:
@@ -104,9 +169,20 @@ def render(spec):
             line += '；画幅处理：'+text(constraint['frame_behavior'],cid+'.frame_behavior')
         lines.append(line)
     lines.append('输入用途：'+'；'.join(f"图{i}={ref['role'].strip()}" for i,ref in enumerate(refs,1))+'。')
+    for i, ref in enumerate(refs, 1):
+        if ref.get('guide'):
+            lines.append('辅助输入：'+templates.GUIDES[ref['guide']].format(index=i))
+        for region in ref.get('regions', []):
+            label = f"{i}{region['location']}"
+            lines.append('拼图分工：' + f"图{label}={region['role']}")
+            if region.get('guide'):
+                lines.append('区域限定：' + templates.GUIDES[region['guide']].format(index=label))
+    for correction in corrections:
+        lines.append('针对性修正：'+templates.CORRECTIONS[correction])
     for key,label in (('lighting','人物光照'),('expression','表情'),('background','背景')):
-        lines.append(label+'：'+text(presentation[key],'presentation.'+key))
-    lines.append('质量：'+text(spec['quality'],'quality'))
+        lines.append(label+'：'+common[key])
+    notes = text(spec.get('quality_notes', ''), 'quality_notes', optional=True)
+    lines.append('质量：'+templates.QUALITY + (' 本轮恢复目标：'+notes if notes else ''))
     if operation=='edit': lines.append(EDIT_CLEAN)
     return '\n'.join(lines)+'\n', ids
 
@@ -143,6 +219,9 @@ def main():
         record={'scope':'prompt_assembly_only','semantic_review_performed_by_script':False,
                 'spec_file':str(args.spec.resolve()),'spec_sha256':hashlib.sha256(raw).hexdigest(),
                 'compiler_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                'template_id': templates.TEMPLATE_ID,
+                'template_sha256': hashlib.sha256(Path(templates.__file__).read_bytes()).hexdigest(),
+                'user_overrides': spec.get('user_overrides', {}),
                 'prompt_sha256':hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
                 'included_constraint_ids':ids,'references':ref_records}
         args.output.parent.mkdir(parents=True,exist_ok=True)

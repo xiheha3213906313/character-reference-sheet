@@ -92,7 +92,8 @@ def supplement(root, role, config):
         require(digest(root / source['file']) == source['sha256'], '补证来源已变化')
         pixels, info = load_panel(root / source['file'], region['crop'])
         kind = source['kind'] if source['kind'] in ('source', 'upstream') else 'native'
-        pending_regions.append((key, pixels, info, kind))
+        source_keys = [k for k,r in packet['sources'].items() if r['sha256'] == source.get('source_sha256', source['sha256'])]
+        pending_regions.append((key, pixels, info, kind, source_keys))
     for spec in comparisons:
         strict(spec, {'id', 'reference_ids', 'reference_crops', 'candidate_crop', 'check_ids'}, {'id', 'reference_ids'})
         key = identifier(spec['id'])
@@ -107,15 +108,18 @@ def supplement(root, role, config):
             load_panel(root / source['file'], crop)
             panels.append({'file': root / source['file'], 'label': item, 'crop': crop})
         require(set(spec.get('check_ids', [])) <= {g['id'] for g in packet['checks']}, '未知检查项id')
-        pending_boards.append((key, panels, spec.get('check_ids', [])))
+        source_keys = list(dict.fromkeys(k for i in refs for k,r in packet['sources'].items()
+                                       if r['sha256'] == artifacts[i].get('source_sha256', artifacts[i]['sha256'])))
+        pending_boards.append((key, panels, spec.get('check_ids', []), source_keys))
     directory.mkdir(parents=True, exist_ok=True)
-    for key, pixels, info, kind in pending_regions:
+    for key, pixels, info, kind, source_keys in pending_regions:
         path = directory / (key + '.png')
         pixels.save(path)
         generated.append({'id': key, 'file': workflow.local(root, path), 'sha256': digest(path),
-                          'kind': kind, 'source': info})
-    for key, panels, checks in pending_boards:
-        board = comparison(directory, key, panels, kind='whole', diagnostic_type='comparison', check_ids=checks)
+                          'kind': kind, 'source': info, 'source_ids': source_keys})
+    for key, panels, checks, source_keys in pending_boards:
+        board = comparison(directory, key, panels, kind='whole', diagnostic_type='comparison', check_ids=checks,
+                           source_ids=source_keys)
         board['file'], board['layout_record'] = workflow.local(root, board['file']), workflow.local(root, board['layout_record'])
         generated.append(board)
     template_path = packet_path.with_name(packet_path.stem + '-report-template.json')
@@ -146,7 +150,12 @@ def handoff(root, status, saved, ref):
     result['supplement_file'] = str(root / ref['file'])
     result['reviewer_handoff'].update(report_template_file=saved['report_template_file'],
         report_output_file=str((root / saved['report_template_file']).with_name('reviewer-output.json')),
+        dispatch_mode='reuse_stage_agent' if saved['reviewer']['mode'] == 'subagent' else 'full_self_review',
+        agent_id=saved['reviewer'].get('agent_id'),
         previous_reviewer=saved['reviewer'])
+    from sheet_flow import submit_command
+    result['reviewer_handoff']['check_report_command'] = submit_command(
+        'check-report', root, status['stage'], Path(result['reviewer_handoff']['report_output_file']))
     result['reviewer_handoff']['task'] += (
         '只补看supplement_file中的必要证据，交回原复核代理，不重新生成。'
         '重新确认完整当前观察集合，不由脚本继承pass；仍不确定保留pending。'

@@ -22,13 +22,21 @@ class PromptTest(unittest.TestCase):
                 'critical_constraints': [{'id': 'visible_design', 'kind': 'shape', 'source_indices': [1],
                                           'statement': 'Fabricated visible design.'}]}
 
+    def test_no_extra_constraints_uses_empty_list_without_fabricating_a_goal(self):
+        spec = self.spec('front')
+        spec['critical_constraints'] = []
+        prompt, ids = build_prompt.render(spec)
+        self.assertEqual([], ids)
+        self.assertIn(templates.ARMS, prompt)
+        self.assertNotIn('Fabricated visible design.', prompt)
+
     def test_each_stage_always_includes_common_parts_once(self):
         for stage in templates.STAGES:
             with self.subTest(stage=stage):
                 prompt, ids = build_prompt.render(self.spec(stage))
                 self.assertIn('比例'+templates.RATIOS[stage], prompt)
                 for part in (templates.FRAMING[stage]['required'], templates.FRAMING[stage]['preferred'],
-                             templates.CHANGES[stage], templates.LIGHTING, templates.EXPRESSION, templates.QUALITY):
+                             templates.CHANGES[stage], templates.LIGHTING, templates.EXPRESSION, templates.EYES, templates.QUALITY):
                     self.assertEqual(1, prompt.count(part))
                 self.assertEqual(['visible_design'], ids)
 
@@ -39,6 +47,17 @@ class PromptTest(unittest.TestCase):
             self.assertIn(clause, prompt)
         for obsolete in ('下缘到锁骨', '全部发丝', '精确90度'):
             self.assertNotIn(obsolete, prompt)
+
+    def test_all_full_views_share_arms_at_sides_and_accessory_ownership(self):
+        from review_policy import FRAMING
+        for stage in ('front', 'back', 'left'):
+            prompt, _ = build_prompt.render(self.spec(stage))
+            self.assertEqual(1, prompt.count(templates.ARMS))
+            self.assertEqual(1, prompt.count(templates.ACCESSORIES))
+            self.assertIn(templates.ARMS_ACCEPTANCE, FRAMING[stage])
+        head, _ = build_prompt.render(self.spec('head'))
+        self.assertNotIn(templates.ARMS, head)
+        self.assertIn(templates.ACCESSORIES, head)
 
     def test_character_changes_do_not_rewrite_common_sections(self):
         first = self.spec()
@@ -76,6 +95,16 @@ class PromptTest(unittest.TestCase):
         prompt, _ = build_prompt.render(spec)
         self.assertIn(templates.BACKGROUNDS['white'], prompt)
         self.assertNotIn(templates.BACKGROUNDS['transparent'], prompt)
+
+    def test_explicit_eye_override_replaces_default_and_requires_user_quote(self):
+        spec = self.spec()
+        spec['user_overrides'] = {'eyes': {'value': '保持用户指定的闭眼。', 'user_quote': '这套要闭眼'}}
+        prompt, _ = build_prompt.render(spec)
+        self.assertNotIn(templates.EYES, prompt)
+        self.assertEqual(1, prompt.count('眼部呈现：保持用户指定的闭眼。'))
+        spec['user_overrides']['eyes'].pop('user_quote')
+        with self.assertRaisesRegex(ValueError, 'user_quote'):
+            build_prompt.render(spec)
 
     def test_edit_uses_fixed_retention_sentence_and_actual_target(self):
         spec = dict(self.spec(), operation='edit', baseline_reference=1, edit_target='Fabricated repair.')

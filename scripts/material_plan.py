@@ -9,6 +9,28 @@ KINDS = {'identity', 'design', 'material'}
 ROLES = {'head', 'front', 'back', 'left'}
 
 
+class PlanError(ValueError):
+    """All incompatible routes, with exact semantic fields; no partial plan save."""
+    def __init__(self, errors):
+        self.field_errors = errors
+        super().__init__('；'.join(e['message'] for e in errors))
+
+
+def route_errors(materials):
+    rear = any(m['decision'] != 'exclude' and set(m['views']) & {'back', 'rear_oblique'} for m in materials)
+    errors = []
+    for i, material in enumerate(materials):
+        front_only = 'front' in material['views'] and not set(material['views']) & {'back', 'rear_oblique'}
+        for j, use in enumerate(material['uses']):
+            if rear and front_only and 'back' in use['stages'] and use['kind'] != 'material':
+                errors.append({'field': f'materials[{i}].uses[{j}]', 'source_id': material['source_id'],
+                    'use_id': use['id'], 'stage': 'back',
+                    'message': material['source_id'] + '/' + use['id'] + '的正面设计/身份不能指定为背面设计依据',
+                    'correction': '仅属材料纹理时改kind为material；含设计时只从本项stages移除back，'
+                                  '将背面可用的材料事实另列kind:material用途。不要连带删除front/left设计依据。'})
+    return errors
+
+
 def validate(materials, sources):
     from sheet_flow import strict, nonempty
     require(isinstance(materials, list) and all(isinstance(m, dict) for m in materials), 'materials须为逐图分析列表')
@@ -17,7 +39,9 @@ def validate(materials, sources):
     lookup, identifiers = {s['source_id']: s for s in sources}, set()
     for m in materials:
         fields = {'source_id', 'views', 'observation', 'quality', 'decision', 'selection_reason', 'uses'}
-        strict(m, fields | {'covered_by'}, fields)
+        strict(m, fields | {'covered_by', 'accessories'}, fields | {'accessories'})
+        from accessory_plan import observations
+        observations(m['accessories'], m['source_id'])
         require(isinstance(m['views'], list) and bool(m['views']) and
                 all(isinstance(v, str) and v in VIEWS for v in m['views']) and
                 len(m['views']) == len(set(m['views'])), 'views须为固定且不重复的实际视角')
@@ -48,15 +72,26 @@ def validate(materials, sources):
                     and target['decision'] in ('adopt', 'partial'),
                     'covered_by仅用于没有独有必需细节的排除图，必须指向已采用的清晰替代图')
             nonempty(m['covered_by']['reason'], 'covered_by.reason须说明清晰替代图覆盖的全部相关信息')
+    errors = route_errors(materials)
+    if errors:
+        raise PlanError(errors)
 
 
 def inject(role, spec, flow):
     """Append planned evidence without shifting caller indices; reuse existing full inputs."""
+    errors = route_errors(flow['materials'])
+    if errors:
+        raise PlanError(errors)
     result = copy.deepcopy(spec)
     refs = result.setdefault('references', [])
     constraints = result.setdefault('critical_constraints', [])
+    require(isinstance(refs, list) and all(isinstance(r, dict) for r in refs),
+            'prompt.references须为对象列表；按制作接口填写source_id/stage/file/panels及role')
+    require(isinstance(constraints, list) and all(isinstance(c, dict) for c in constraints),
+            'prompt.critical_constraints须为对象列表，不能填字符串；每项需id/kind/source_indices/statement，无额外约束填[]')
+    require(all(isinstance(c.get('id'), str) for c in constraints), 'prompt.critical_constraints[].id须为文本')
     require(not any(c.get('id', '').startswith('planned_') for c in constraints), 'planned_为接口保留的选材目标前缀')
-    rear = any(m['decision'] != 'exclude' and set(m['views']) & {'back', 'rear_oblique'} for m in flow['materials'])
+    require(not any(c['id'].startswith('visibility_') for c in constraints), 'visibility_为接口保留的饰品可见性目标前缀')
     pending, coverage = {}, []
     lookup = {s['source_id']: s for s in flow['sources']}
     for m in flow['materials']:
@@ -64,8 +99,6 @@ def inject(role, spec, flow):
             if role not in use['stages']:
                 continue
             front_only = 'front' in m['views'] and not set(m['views']) & {'back', 'rear_oblique'}
-            if role == 'back' and rear and front_only:
-                require(use['kind'] == 'material', m['source_id'] + '的正面设计/身份不能指定为背面设计依据；仅材料纹理适用时将kind设为material')
             guide = 'front_material' if role == 'back' and front_only else None
             # An uncropped original already sent provides this fact without another input slot.
             index = next((i for i, ref in enumerate(refs, 1)

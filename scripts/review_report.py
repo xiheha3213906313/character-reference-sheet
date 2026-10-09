@@ -32,6 +32,25 @@ def production_input_errors(report):
     return errors
 
 
+def production_evidence_errors(root, role, report, flow):
+    """Supplement metadata is produced by the script, never relabelled by the reviewer."""
+    if report.get('supplement_round') != 1:
+        return [{'field': 'extra_evidence', 'message': '首次复核只用预制证据；确实待核实时走一次supplement入口'}] if report.get('extra_evidence') else []
+    try:
+        ref = flow['stages'][role].get('supplement')
+        if not ref or digest(root / ref['file']) != ref['sha256']:
+            raise ValueError('先执行返回的supplement入口，不能手写或替换补证批次')
+        batch = read(root / ref['file'])
+        if batch['packet_sha256'] != report.get('packet_sha256') or report.get('extra_evidence') != batch['evidence']:
+            raise ValueError('沿用脚本生成的extra_evidence，不改用途、标签或来源')
+        for entry in batch['evidence']:
+            if digest(root / entry['file']) != entry['sha256']:
+                raise ValueError('脚本补证文件已变化，不沿用旧引用')
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return [{'field': 'extra_evidence', 'message': str(exc)}]
+    return []
+
+
 def report_errors(root, role, report, values):
     brief, state, selection, flow = values
     errors = []
@@ -137,6 +156,9 @@ def report_errors(root, role, report, values):
         need(call is (choice.get('processing') or [None])[-1], 'call_id', '只复核当前处理版本')
         need(not call.get('pixel_equivalence'), 'kind', '无损处理只需processing-check，不重复完整复核')
     expected = packet.get('review_context', {}).get('agent_id')
+    from review_policy import validate_stage_reviewer, check_review_coverage
+    attempt('reviewer.agent_id', lambda: validate_stage_reviewer(root, role, report))
+    attempt('evidence_coverage', lambda: check_review_coverage(packet, report))
     if expected and isinstance(report.get('reviewer'), dict) and report['reviewer'].get('mode') == 'subagent':
         need(report['reviewer'].get('agent_id') == expected or bool(report.get('reviewer_replacement_reason')), 'reviewer.agent_id', '返修交回原代理；替换须记录原因')
     round_number = report.get('supplement_round', 0)
@@ -195,4 +217,6 @@ def report_errors(root, role, report, values):
                          and 0 <= xy[0] < image.width and 0 <= xy[1] < image.height, position + '.xy', '采样坐标无效')
     if identifiers == set(goals) and all(isinstance(c, dict) and c.get('result') == 'pass' for c in checks):
         attempt('quality_observations', lambda: check_quality_observations(report))
+    elif not any(isinstance(c, dict) and c.get('result') == 'fail' for c in checks):
+        need(identifiers == set(goals), 'checks', '复核报告遗漏检查项；完成本阶段所需查看后一次返回，缺字段不能作为补证轮次')
     return errors

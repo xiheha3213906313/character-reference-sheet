@@ -56,6 +56,8 @@ def snapshot(root, value, category):
 def recipe_snapshot(root, config):
     require(isinstance(config, dict), '须提供实际调用recipe')
     recipe = {'tool': config.get('tool'), 'parameters': config.get('parameters')}
+    if 'argument_fields' in config:
+        recipe['argument_fields'] = copy.deepcopy(config['argument_fields'])
     require(bool(recipe['tool']) and isinstance(recipe['parameters'], dict), '缺少实际tool/parameters')
     prompt = snapshot(root, config.get('prompt_file'), '提示词')
     require(bool(within(root, prompt['file']).read_text(encoding='utf-8-sig').strip()), '实际提示词为空')
@@ -64,7 +66,8 @@ def recipe_snapshot(root, config):
     recipe['inputs'] = []
     for entry in config['inputs']:
         require(isinstance(entry, dict) and bool(entry.get('purpose')), '输入须明确用途')
-        recipe['inputs'].append(dict(snapshot(root, entry.get('file'), '参考'), purpose=entry['purpose']))
+        recipe['inputs'].append(dict(snapshot(root, entry.get('file'), '参考'), purpose=entry['purpose'],
+                                     **{key: copy.deepcopy(entry[key]) for key in ('guide', 'regions') if key in entry}))
     return recipe
 
 
@@ -135,7 +138,8 @@ def prepare(root, role, config, values):
     count = config.get('required_calls', (old or {}).get('required_calls', 3)) if brief['task_mode'] == 'production' else 1
     override = config.get('user_override_reason', (old or {}).get('user_override_reason'))
     require(type(count) is int and 1 <= count <= 3 and (count == 3 or bool(override) or brief['task_mode'] == 'existing_review'), '候选数量例外须有用户要求')
-    changed = old and (recipe != old['recipe'] or target != state['stages'].get(role, {}).get('target_sha256')
+    changed = old and (state['stages'].get(role, {}).get('plan_requires_prepare') or
+                       recipe != old['recipe'] or target != state['stages'].get(role, {}).get('target_sha256')
                        or deps != state['stages'].get(role, {}).get('dependencies') or policy != old['reviewer_policy'])
     if old and old.get('baseline_call'):
         require(count == old['required_calls'] and override == old.get('user_override_reason'), '批准首张后不能临时改组选优次数')
@@ -174,8 +178,31 @@ def retry_context(role, choice, workflow):
                                    for item in review['checks'] if item['result'] == 'fail'],
                         'instruction': '交回本阶段原复核子代理。先复查上次问题，并看新图整体、头发、面部和明显新增错误；'
                                        '不重复展开全部旧证据。饰品错位、长度等就当这样设计，关系合理即通过；'
-                                       '不要求精确还原，明显画质错误仍拒绝。'}
+                                       '不要求精确还原；承载物错误、复制到另一面或与清楚原图的可见性矛盾仍拒绝，明显画质错误仍拒绝。'}
     return {'mode': 'initial'}
+
+
+def generation_context(root, role, call):
+    """Freeze the exact registered recipe, without maker conclusions or a guessed prompt."""
+    binding = call.get('recipe_sha256')
+    if not binding:
+        return {'status': 'not_recorded', 'reason': '本项为既有图审查或后处理，没有登记新的生图配方。'}
+    choices = read(within(root, SELECTION))['stages']
+    history = read(within(root, WORKFLOW))['history']
+    groups = [h['selection'] for h in history if h['stage'] == role] + [choices.get(role, {})]
+    recipe = next((g['recipe'] for g in groups if g.get('recipe') and recipe_binding(g['recipe']) == binding), None)
+    require(recipe is not None, '复核包找不到本次调用的真实配方')
+    prompt_path = within(root, recipe['prompt_file'])
+    require(digest(prompt_path) == recipe['prompt_sha256'], '复核包的实际提示词已变化')
+    references = []
+    for index, entry in enumerate(recipe['inputs'], 1):
+        require(digest(within(root, entry['file'])) == entry['sha256'], '复核包的实际输入已变化')
+        references.append({'index': index, **copy.deepcopy(entry)})
+    return {'status': 'recorded', 'recipe_sha256': binding,
+            'prompt_file': recipe['prompt_file'], 'prompt_sha256': recipe['prompt_sha256'],
+            'prompt': prompt_path.read_text(encoding='utf-8-sig'), 'tool': recipe['tool'],
+            'parameters': copy.deepcopy(recipe['parameters']), 'references': references,
+            **({'argument_fields': copy.deepcopy(recipe['argument_fields'])} if 'argument_fields' in recipe else {})}
 
 
 def evidence_packet(root, role, call, brief, deps, policy, extra_evidence=None, review_context=None, minimal=False):
@@ -207,10 +234,11 @@ def evidence_packet(root, role, call, brief, deps, policy, extra_evidence=None, 
             mark_background_samples(canvas, samples)
             canvas.save(directory / f'{identifier}.png')
             add(identifier, directory / f'{identifier}.png', 'background', background=identifier)
-    used = set() if minimal else {key for goal in brief['checks'][role] for key in goal['source_ids']}
+    used = set() if minimal else {key for goal in brief['checks'][role]
+                                 if goal.get('reference_display') != 'context_only' for key in goal['source_ids']}
     for key in sorted(used):
         path = within(root, brief['sources'][key]['file'])
-        if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp'):
+        if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'):
             source_sha = digest(path)
             diagnostic = within(root, f'制作记录/对照/来源/{source_sha}.png')
             diagnostic.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +291,7 @@ def evidence_packet(root, role, call, brief, deps, policy, extra_evidence=None, 
         panels.append({'file': directory / 'whole.png', 'label': '候选', 'crop': spec.get('candidate_crop')})
         board = comparison(directory, f'compare_{index:03d}', panels,
                            check_ids=spec.get('check_ids', []),
+                           reference_scopes=spec.get('reference_scopes', []),
                            source_ids=[lookup[i].get('source_id') for i in ids if lookup[i].get('source_id')],
                            upstream_stages=[lookup[i].get('stage') for i in ids if lookup[i].get('stage')])
         board['panels'] = [{'file': local(root, p['file']), 'sha256': digest(p['file'])} for p in panels]
@@ -278,21 +307,30 @@ def evidence_packet(root, role, call, brief, deps, policy, extra_evidence=None, 
         rgba = output.convert('RGBA')
         transparent = rgba.getchannel('A').getextrema()[0] == 0
     params = call.get('recipe_parameters', {})
-    background_policy = ({'mode': 'transparent', 'alpha_source': 'model' if params.get('transparent_background') is True else None}
+    background_policy = ({'mode': 'transparent', 'alpha_source': 'model' if call.get('recipe_sha256') or params.get('transparent_background') is True else None}
                          if transparent else {'mode': 'near_white_rgb_fallback', 'alpha_limitation': 'output',
-                                              'reason': '实际PNG输出没有透明空白；按RGB输出核验'})
+                                              'reason': '实际图片没有透明空白；按RGB输出核验'})
     return {'schema_version': 2, 'stage': role, 'call_id': call['id'],
             'candidate_sha256': call['output']['sha256'], 'target_sha256': target_binding(brief, role),
             'dependencies': deps, 'reviewer_policy': policy, 'checks': brief['checks'][role],
+            'generation_context': generation_context(root, role, call),
             'acceptance_standard': ACCEPTANCE_STANDARD, 'review_context': review_context or {'mode': 'initial'},
             'packet_role': 'candidate_evidence', 'reviewer_role': 'visual_reviewer', 'background_policy': background_policy,
             'dispatch_prerequisite': 'valid_maker_self_check',
-            'maker_instructions': '制作模型只看参考—候选拼图，简单检查取景、身份造型、头发面部和服装位置的明显错误；'
+            'maker_instructions': '制作模型只看参考—候选拼图，简单检查取景、身份造型、头发面部、服装位置及全身静态站姿的明显错误；'
+                                  '默认可见眼睛应自然睁开，原图闭眼不必复制；未知瞳孔按当前风格补全，刘海自然遮眼允许。用户明确另定时遵从。'
+                                  '正面双脚明显一前一后属于动作错误；长裙按原图盖脚属于正常遮挡，不为露鞋改裙摆。'
+                                  '全身明显抱手、交握、抬臂也属于姿态错误，双臂应在身体两侧自然下垂，不能因参考或上游如此生成而接受。'
+                                  '还简查显眼挂饰的承载物与可见面，原图明确无饰的区域不能凭同套一致新增饰品。'
                                   '用一两句实际观察填写self-check-template，不展开全流程自评。自评失败自行修复；'
                                   'receive已一次生成全部必要复核图片；制作端仍只看这些对照拼图。'
                                   '自评通过且接口返回reviewer_dispatch_ready:true后，才启动或联系本阶段复核代理，不额外运行status。',
             'background_sample_candidates': samples, 'self_check_fields': ['observation', 'viewed_evidence_ids'],
-            'reviewer_instructions': '所有证据已由receive准备好，直接查看，不自行重新裁图、拼图或生成背景。'
+            'reviewer_instructions': '先读取generation_context中的本次实际提示词与按真实顺序记录的参考用途/分区，按evaluation_scope核对当前视角可见内容。'
+                                     'comparison.reference_scopes限定每张原图核对哪些检查项；context_only目标只用已记事实检查候选是否误添，不打开其画外/异视角来源。'
+                                     '默认自然睁眼，原图闭眼不锁身份；未知瞳孔可按当前风格合理补全，不以无法证明原始瞳色拒绝。用户明确另定时遵从。'
+                                     '提示词是生成意图，不是视觉结论；不得把留白或强制露鞋等自拟目标加严成验收门槛。'
+                                     '所有证据已由receive准备好，直接查看，不自行重新裁图、拼图或生成背景。'
                                      '只看必要拼图和原生局部，返回模板中的实际观察与结论；不要运行哈希/采像素命令、排序、生图或打包。'
                                      '无需打开全部文件；拼图看清后不再打开其源文件。原生质量和缩小质量分开看。'
                                      '背景只开alpha_compare，图中编号对应background_sample_candidates顺序；确认空白点，无需检查坐标像素。'
@@ -349,10 +387,27 @@ def review_dispatch(root, call, processing=False):
     selection_image(call['output'], root, packet['stage'])
     template = within(root, call['packet_file']).with_name(Path(call['packet_file']).stem + '-report-template.json')
     require(template.is_file(), '自评通过后的复核模板缺失，修复记录后再交代理')
+    from review_policy import stage_reviewer
+    from sheet_flow import submit_command
+    known = stage_reviewer(root, packet['stage'])
+    output = template.with_name(template.stem.removesuffix('-report-template') + '-reviewer-output.json')
+    policy = packet['reviewer_policy']
+    dispatch = 'full_self_review' if policy['mode'] == 'self' else 'reuse_stage_agent' if known else 'spawn_new_stage_agent'
     return {'reviewer_dispatch_ready': True, 'review_context': packet.get('review_context'),
             'reviewer_handoff': {'packet_file': call['packet_file'], 'packet_sha256': call['packet_sha256'],
-                                 'report_template_file': local(root, template), 'root': str(root.resolve()),
-                                 'task': REVIEWER_TASK}}
+                                 'stage': packet['stage'], 'dispatch_mode': dispatch,
+                                 'agent_id': known if dispatch == 'reuse_stage_agent' else None,
+                                 'model': policy.get('model') or 'inherited', 'task_name': 'review_' + packet['stage'],
+                                 'report_template_file': local(root, template), 'report_output_file': str(output),
+                                 'check_report_command': submit_command('check-report', root, packet['stage'], output),
+                                 'root': str(root.resolve()),
+                                 'task': REVIEWER_TASK + '只读取本次packet_file和report_template_file一次；'
+                                         'dispatch_mode为full_self_review时由制作模型完整自评，不启动代理。否则本阶段首次必须新建复核代理，使用fork_turns:none；不得复用其他阶段代理或共享其他阶段的观察/结论。'
+                                         '本阶段返修、补证和所选新增候选复用本阶段agent_id；其他阶段各自新建。'
+                                         '提示词全文在generation_context.prompt，参考用途在references，路径以交接字段为准。'
+                                         '不猜其他字段、查目录、重读提示词文件或读取聊天；有缺失按实际字段报告故障。'
+                                         '实际完成全部适用查看后写report_output_file，执行check_report_command只读预检。'
+                                         '若缺字段或漏看，只在本次交接内补足真实查看再预检；report_ready后一次返回最终报告。'}}
 
 
 def register(root, role, config, values):
@@ -360,6 +415,7 @@ def register(root, role, config, values):
     brief, state, selection, workflow = values
     require(role in selection['stages'], '先prepare本阶段')
     choice = selection['stages'][role]
+    require(not state['stages'][role].get('plan_requires_prepare'), '选材计划已更新，先重新prepare；不能登记旧目标调用')
     require(state['stages'][role]['target_sha256'] == target_binding(brief, role), '先重新prepare变化的目标')
     deps = dependencies(root, state, role, brief)
     require(state['stages'][role]['dependencies'] == deps, '上游已变化，先prepare')
@@ -637,6 +693,8 @@ def record_processing_check(root, role, config, values):
 
 def record_review(root, role, config, values):
     brief, state, selection, workflow = values
+    require(not any(state['stages'].get(r, {}).get('plan_requires_prepare') for r in (*DEPENDENCIES[role], role)),
+            '选材计划已更新，先按接口重新prepare；旧简评、复核或排序不能恢复批准')
     choice = selection['stages'].get(role)
     require(choice is not None, '先prepare本阶段')
     kind = config.get('kind', 'visual')
@@ -672,6 +730,8 @@ def record_review(root, role, config, values):
         refresh(root, role, values)
         return
     reviewer_valid(config.get('reviewer'), choice['reviewer_policy'])
+    from review_policy import validate_stage_reviewer
+    validate_stage_reviewer(root, role, config)
     require(config.get('kind', 'visual') == 'visual', 'kind须为visual或selection')
     identifier = config.get('call_id')
     processing = identifier in processing_calls
@@ -687,6 +747,8 @@ def record_review(root, role, config, values):
     packet_file = call.get('packet_file')
     require(packet_file is not None, '先完成比较选择再核验新增优胜候选')
     packet = read(within(root, packet_file))
+    from review_policy import check_review_coverage
+    check_review_coverage(packet, config)
     expected_agent = packet.get('review_context', {}).get('agent_id')
     if expected_agent and config['reviewer']['mode'] == 'subagent':
         require(config['reviewer'].get('agent_id') == expected_agent or bool(config.get('reviewer_replacement_reason')),

@@ -62,7 +62,32 @@ def target_binding(brief, role):
 
 
 def recipe_binding(recipe):
-    return fingerprint({key: recipe.get(key) for key in ('prompt_sha256', 'inputs', 'tool', 'parameters')})
+    return fingerprint({**{key: recipe.get(key) for key in ('prompt_sha256', 'inputs', 'tool', 'parameters')},
+                        **({'argument_fields': recipe['argument_fields']} if 'argument_fields' in recipe else {})})
+
+
+def validate_generation_context(packet, root, expected_binding=None):
+    """Check frozen review context against actual recipe bytes; makes no visual claim."""
+    context = packet.get('generation_context', {})
+    if context.get('status') == 'not_recorded':
+        require(expected_binding is None and bool(context.get('reason')), '真实生图调用不能省略提示词与参考用途')
+        return
+    require(context.get('status') == 'recorded', '复核包缺少实际生成上下文')
+    references = context.get('references')
+    require(isinstance(references, list) and bool(references) and
+            all(r.get('index') == index for index, r in enumerate(references, 1)), '复核参考顺序缺失或变化')
+    recipe = {key: context.get(key) for key in ('prompt_file', 'prompt_sha256', 'tool', 'parameters')}
+    if 'argument_fields' in context:
+        recipe['argument_fields'] = context['argument_fields']
+    recipe['inputs'] = [{key: value for key, value in ref.items() if key != 'index'} for ref in references]
+    binding = recipe_binding(recipe)
+    require(binding == context.get('recipe_sha256') and (expected_binding is None or binding == expected_binding),
+            '复核生成上下文不属于本次配方')
+    prompt = within(root, recipe['prompt_file'])
+    require(digest(prompt) == recipe['prompt_sha256'] and
+            prompt.read_text(encoding='utf-8-sig') == context.get('prompt'), '复核提示词与真实提示词不一致')
+    for ref in references:
+        require(bool(ref.get('purpose')) and digest(within(root, ref['file'])) == ref['sha256'], '复核输入文件或用途已变化')
 
 
 def maker_valid(reviewer):
@@ -86,6 +111,7 @@ def validate_self_check(call, root, require_pass=True):
     packet_path = within(root, call['packet_file'])
     require(digest(packet_path) == call['packet_sha256'], '简单自评任务包已变化')
     packet = read(packet_path)
+    validate_generation_context(packet, root, call.get('recipe_sha256'))
     check_self_observations(report, packet)
     for artifact in packet['evidence']:
         if artifact['id'] in report['viewed_evidence_ids']:
@@ -246,6 +272,9 @@ def validate_review_integrity(review, brief, role, root, policy, expected_call=N
     require(digest(packet_path) == review.get('packet_sha256'), '复核任务包已变化')
     packet = read(packet_path)
     require(packet.get('stage') == role, '复核任务包不属于当前阶段')
+    from review_policy import validate_stage_reviewer, check_review_coverage
+    validate_stage_reviewer(root, role, report)
+    check_review_coverage(packet, report)
     if expected_call is not None:
         require(packet.get('call_id') == expected_call.get('id') and
                 review.get('sha256') == expected_call.get('output', {}).get('sha256'),
@@ -297,6 +326,7 @@ def validate_visual(review, brief, role, root, policy, require_report=True, expe
     packet = within(root, review.get('packet_file'))
     require(digest(packet) == review.get('packet_sha256'), f'{role}复核任务包已变化')
     packet_data = read(packet)
+    validate_generation_context(packet_data, root, expected_call.get('recipe_sha256') if expected_call else None)
     if packet_data.get('self_check_fields') and (require_report or review.get('report_file')):
         check_quality_observations(read(within(root, review['report_file'])))
     require(packet_data.get('candidate_sha256') == review.get('sha256') and
@@ -518,6 +548,7 @@ def check_v2(record, root, stage=None, before=None, expected_task_mode=None, bas
             source = brief['sources'][key]
             require(digest(within(root, source['file'])) == source['sha256'], f'{role}来源{key}已变化')
         data = record.get('stages', {}).get(role, {})
+        require(not data.get('plan_requires_prepare'), f'{role}选材计划已更新，先按接口重新prepare；旧批准不能复用')
         require(data.get('target_sha256') == target, f'{role}目标版本变化或缺少当前记录')
         expected_deps = {up: approve(up) for up in DEPENDENCIES[role]} if brief.get('scope', 'full_sheet') == 'full_sheet' else {}
         require(data.get('dependencies') == expected_deps, f'{role}引用的上游版本/目标不是当前版本')

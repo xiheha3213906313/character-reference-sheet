@@ -1,5 +1,6 @@
 """Prepare and publish a complete existing-image delivery, without generating or judging images."""
 import argparse
+import copy
 import json
 import os
 from pathlib import Path
@@ -90,21 +91,65 @@ def prepare_bundle(root, flow, values, binding, layout):
 
 
 def checked_copy(bundle, destination):
-    """Copy only into a new destination or verify an identical completed copy; never delete."""
+    """Resume only our bound copy, never overwrite unrelated destination content."""
     source_files = {p.relative_to(bundle).as_posix(): digest(p) for p in bundle.rglob('*') if p.is_file()}
+    marker = destination.with_name('.' + destination.name + '.sheet-copy.json')
+    expected_marker = {'artifact': 'sheet_copy_in_progress', 'source': str(bundle.resolve()),
+                       'destination': str(destination.resolve()), 'files': source_files}
+    owned = marker.is_file() and read(marker) == expected_marker
     if destination.exists():
         require(destination.is_dir(), '交付目标已存在且不是目录')
         existing = {p.relative_to(destination).as_posix(): digest(p) for p in destination.rglob('*') if p.is_file()}
-        require(existing == source_files, '目标目录已有不同内容；保留原目录，选择新目录，不覆盖旧交付')
-    else:
-        shutil.copytree(bundle, destination)
+        if existing == source_files:
+            if owned:
+                marker.unlink()
+            return
+        require(owned and set(existing) <= set(source_files) and all(source_files[k] == v for k,v in existing.items()),
+                '目标目录已有不同内容且不是本次可续传复制；保留原目录，不覆盖旧交付')
+    require(not marker.exists() or owned, '复制续传标记属于另一版本，保留原目标及标记')
+    if not owned:
+        workflow.write(marker, expected_marker)
+    destination.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    for relative, sha in source_files.items():
+        target = destination / relative
+        require(not target.is_symlink(), '交付目标内不能通过符号链接写入其他目录')
+        if target.is_file():
+            require(digest(target) == sha, '续传文件已变化，保留目标：' + relative)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(prefix='.sheet-copy-', suffix='.tmp', dir=target.parent)
+        os.close(handle)
+        temporary = Path(temporary)
+        try:
+            shutil.copyfile(bundle / relative, temporary)
+            require(digest(temporary) == sha, '复制文件校验失败：' + relative)
+            require(not target.exists(), '续传期间目标新增文件，停止覆盖：' + relative)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
     copied = {p.relative_to(destination).as_posix(): digest(p) for p in destination.rglob('*') if p.is_file()}
     require(copied == source_files, '最终目录复制校验失败')
+    marker.unlink()
+
+
+def destination_for(flow, overview, binding):
+    """Choose a new material subdirectory once, then keep it through retries."""
+    if flow.get('delivery_override'):
+        return Path(flow['delivery_override']['destination']).resolve()
+    base = Path(flow['source_directory']).resolve() / Path(overview).stem
+    candidate = base
+    number = 0
+    while candidate.exists() or candidate.with_name('.' + candidate.name + '.sheet-copy.json').exists():
+        number += 1
+        suffix = '_' + binding[:8] + (f'_{number}' if number > 1 else '')
+        candidate = base.with_name(base.name + suffix)
+    return candidate
 
 
 def deliver(root, config):
     from sheet_flow import strict, nonempty, save
-    strict(config, {'inspection', 'destination', 'destination_reason', 'layout'})
+    strict(config, {'inspection', 'layout'})
     flow, values = read_flow(root), workflow.load_all(root)
     require(set(values[1]['stages']) == set(ROLES), '四阶段未完成，不能提前准备交付')
     gate = review_gate.check(values[1], root)
@@ -128,7 +173,8 @@ def deliver(root, config):
         flow['delivery'] = {'state': 'pending_inspection', 'binding_sha256': binding, 'layout': layout,
                             'bundle_directory': workflow.local(root, bundle),
                             'overview': {'file': overview, 'sha256': digest(bundle / overview)},
-                            'relationship_board': board, 'inspection': None, 'destination': None,
+                            'relationship_board': board, 'inspection': None,
+                            'destination': str(destination_for(flow, overview, binding)),
                             'file_integrity': 'not_checked', 'record_integrity': 'not_checked',
                             'visual_assessment': 'pending'}
         save(root, flow, values)
@@ -172,11 +218,12 @@ def deliver(root, config):
         return {'next_action': 'repair_delivery' if inspection['result'] == 'fail' else 'supplement_delivery_evidence',
                 'visual_assessment': inspection['result'], 'generated_images': False}
     default_destination = Path(flow['source_directory']) / Path(overview).stem
-    destination = Path(config.get('destination', default_destination)).resolve()
+    override = flow.get('delivery_override')
+    destination = Path(receipt['destination']).resolve()
     require(destination != root and not destination.is_relative_to(bundle) and not bundle.is_relative_to(destination),
             '交付目标不能覆盖制作根目录或交付预备目录')
-    if destination != default_destination.resolve():
-        manifest['delivery_directory_override_reason'] = nonempty(config.get('destination_reason'), 'destination_reason须为用户指定目的地的原话')
+    if override:
+        manifest['delivery_directory_override_reason'] = nonempty(override['user_quote'], 'start时保存的用户目的地原话')
         workflow.write(bundle / '制作记录/交付清单.json', manifest)
     if receipt['state'] == 'complete' and receipt['destination'] == str(destination):
         checked_copy(bundle, destination)
@@ -190,15 +237,15 @@ def deliver(root, config):
     workflow.write(bundle / '制作记录/交付清单.json', manifest)
     before_copy = check_delivery.check(manifest, bundle, files_only=True)
     require(before_copy['file_checks_passed'], '复制前文件检查失败：' + '；'.join(before_copy['errors']))
+    completed_flow = copy.deepcopy(flow)
+    completed_flow['delivery']['state'] = 'complete'
+    workflow.write(bundle / FLOW, completed_flow)
+    export(bundle, completed_flow, values)
     checked_copy(bundle, destination)
     final = check_delivery.check(manifest, destination)
     require(final['recorded_delivery_valid'], '最终交付检查失败：' + '；'.join(final['errors'] + final['review_errors']))
     receipt['state'] = 'complete'
     save(root, flow, values)
-    for relative in (FLOW, RECORD, '制作记录/制作记录.md'):
-        shutil.copyfile(root / relative, bundle / relative)
-        shutil.copyfile(root / relative, destination / relative)
-    checked_copy(bundle, destination)
     return delivery_result(destination, overview, final)
 
 
@@ -207,4 +254,5 @@ def delivery_result(destination, overview, final):
             'editor_file': str(destination / '编辑画布.html'), 'record_file': str(destination / RECORD),
             'file_integrity': final['file_integrity'], 'record_integrity': final['record_integrity'],
             'visual_assessment': final['visual_assessment'], 'delivery_visual_check': 'recorded_pass',
+            'instruction': '交付复制与最终核对已完成；使用返回的目录、总览和网页入口后停止。不要重复deliver、列目录或自行再复制outputs。',
             'candidate_count': len(read(destination / '网页资源/画布清单.json')['candidates'])}

@@ -1,7 +1,8 @@
 """Validate our published record schema's used subset, with no third-party runtime dependency.
 
 This is not a general JSON Schema implementation. Supported keywords are exactly
-those used in production-record.schema.json; unknown keywords fail closed.
+those used in production-record.schema.json and front-structure.schema.json;
+unknown keywords fail closed.
 """
 from datetime import datetime
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 import re
 
 
-KEYWORDS = {'$schema', 'title', '$defs', '$ref', 'type', 'additionalProperties', 'required', 'properties',
+KEYWORDS = {'$schema', '$id', 'title', '$defs', '$ref', 'type', 'additionalProperties', 'propertyNames', 'required', 'properties',
             'const', 'enum', 'anyOf', 'oneOf', 'items', 'minItems', 'maxItems', 'uniqueItems', 'minLength', 'minimum', 'exclusiveMinimum', 'pattern', 'format'}
 
 
@@ -54,6 +55,9 @@ def validate(value, schema=None):
         if 'enum' in rule and encoded not in [json.dumps(x, ensure_ascii=False, sort_keys=True) for x in rule['enum']]:
             raise ValueError(path + ': outside enum')
         if isinstance(data, dict):
+            if 'propertyNames' in rule:
+                for key in data:
+                    visit(key, rule['propertyNames'], path + '.<key>')
             missing = set(rule.get('required', [])) - set(data)
             if missing:
                 raise ValueError(path + ': missing ' + ', '.join(sorted(missing)))

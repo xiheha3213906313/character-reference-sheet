@@ -113,7 +113,7 @@ class WorkflowTest(unittest.TestCase):
             checks = checks[:1]
         return {'kind': 'visual', 'call_id': identifier,
                 'packet_sha256': core.digest(self.root / call['packet_file']),
-                'reviewer': copy.deepcopy(reviewer or self.reviewer),
+                'reviewer': copy.deepcopy(reviewer or (self.reviewer if role == 'head' else {**self.reviewer, 'agent_id': self.reviewer['agent_id'] + '-' + role})),
                 'viewed_evidence_ids': [artifact['id'] for artifact in packet['evidence']],
                 'checks': checks, 'supplement_round': round_number,
                 'quality_observations': {'hair': 'Fabricated hair detail observation.', 'face': 'Fabricated face surface observation.'},
@@ -1248,7 +1248,7 @@ class WorkflowTest(unittest.TestCase):
     def test_preflight_accepts_real_absolute_supplement_path(self):
         self.prepare()
         self.register('first')
-        report = self.report('first', result='pending', partial=True)
+        report = self.report('first', result='pending')
         report['extra_evidence'] = [{'id': 'detail_context', 'file': str(self.source), 'kind': 'source'}]
         run, output = self.run_report_cli(report)
         self.assertEqual(0, run.returncode, output)

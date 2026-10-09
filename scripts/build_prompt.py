@@ -17,7 +17,7 @@ def text(value, name, optional=False):
 def render(spec):
     required = {'operation','stage','references','identity','critical_constraints'}
     optional = {'character_name','outfit','height_cm','baseline_reference','edit_target',
-                'allowed_changes','quality_notes','user_overrides','background_mode','background_fallback_reason','corrections'}
+                'allowed_changes','quality_notes','user_overrides','background_mode','background_fallback_reason','corrections','visibility_notes','spatial_notes'}
     if not isinstance(spec, dict) or not required <= spec.keys():
         raise ValueError(f'Missing spec fields: {sorted(required - set(spec) if isinstance(spec, dict) else required)}')
     if set(spec) - required - optional:
@@ -83,8 +83,8 @@ def render(spec):
     if not isinstance(allowed,list) or any(not isinstance(v,str) or not v.strip() for v in allowed):
         raise ValueError('allowed_changes must be a list of nonempty strings')
     constraints = spec['critical_constraints']
-    if not isinstance(constraints,list) or not constraints:
-        raise ValueError('critical_constraints must be a nonempty list')
+    if not isinstance(constraints,list):
+        raise ValueError('critical_constraints must be a list; use [] when no additional constraints apply')
     lines = [f"任务：{'生成' if operation=='generate' else '编辑'}参考中的同一角色、本套{STAGES[stage]}，比例{ratio}。"]
     if stage!='head' and 'height_cm' in spec:
         height=spec['height_cm']
@@ -102,6 +102,16 @@ def render(spec):
     preferred=common['framing_preferred']
     if preferred: lines.append('在上述完整性条件下协调：'+preferred)
     lines.append('身份：'+text(spec['identity'],'identity'))
+    lines.append('参考范围：' + templates.REFERENCE_SCOPE)
+    lines.append('饰品位置：' + templates.ACCESSORIES)
+    visibility = spec.get('visibility_notes', [])
+    if not isinstance(visibility, list) or any(not isinstance(v, str) or not v.strip() for v in visibility):
+        raise ValueError('visibility_notes须为综合饰品表编译的非空文本列表')
+    spatial = spec.get('spatial_notes', [])
+    if not isinstance(spatial, list) or any(not isinstance(v, str) or not v.strip() for v in spatial):
+        raise ValueError('spatial_notes须为所选正面遮挡分析编译的非空文本列表')
+    lines.extend('饰品可见性：' + note for note in visibility)
+    lines.extend('空间遮挡：' + note for note in spatial)
     if stage == 'back':
         lines.append('背面依据：' + templates.BACK_REFERENCE_RULE)
     ids=[]
@@ -179,7 +189,7 @@ def render(spec):
                 lines.append('区域限定：' + templates.GUIDES[region['guide']].format(index=label))
     for correction in corrections:
         lines.append('针对性修正：'+templates.CORRECTIONS[correction])
-    for key,label in (('lighting','人物光照'),('expression','表情'),('background','背景')):
+    for key,label in (('lighting','人物光照'),('expression','表情'),('eyes','眼部呈现'),('background','背景')):
         lines.append(label+'：'+common[key])
     notes = text(spec.get('quality_notes', ''), 'quality_notes', optional=True)
     lines.append('质量：'+templates.QUALITY + (' 本轮恢复目标：'+notes if notes else ''))

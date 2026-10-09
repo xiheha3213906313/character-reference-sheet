@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:character-reference-sheet:front-structure",
+  "title": "Fixed maker-observed front structure artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "binding_sha256", "front_sha256", "semantics", "sources", "items"],
+  "properties": {
+    "artifact": {"const": "front_structure_analysis"},
+    "binding_sha256": {"$ref": "#/$defs/hash"},
+    "front_sha256": {"$ref": "#/$defs/hash"},
+    "semantics": {"const": "maker_observed_relations; not_visual_approval"},
+    "sources": {
+      "type": "object", "required": ["front_selected"],
+      "propertyNames": {"pattern": "^(front_selected|s[0-9]{3,})$"},
+      "additionalProperties": {"$ref": "#/$defs/fileRef"}
+    },
+    "items": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/item"}}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "text": {"type": "string", "minLength": 1},
+    "ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^(front_selected|s[0-9]{3,})$"}},
+    "fileRef": {
+      "type": "object", "additionalProperties": false, "required": ["file", "sha256"],
+      "properties": {"file": {"$ref": "#/$defs/text"}, "sha256": {"$ref": "#/$defs/hash"}}
+    },
+    "view": {
+      "type": "object", "additionalProperties": false,
+      "required": ["visibility", "visible_portion", "hidden_portion", "reason", "source_ids"],
+      "properties": {
+        "visibility": {"enum": ["visible", "not_visible", "unclear"]},
+        "visible_portion": {"$ref": "#/$defs/text"}, "hidden_portion": {"$ref": "#/$defs/text"},
+        "reason": {"$ref": "#/$defs/text"}, "source_ids": {"$ref": "#/$defs/ids"}
+      }
+    },
+    "item": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "front_observation", "attachment", "path", "occluded_by", "source_ids", "stages"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^(hair_flow|clothing_layers|accessory_[a-z][a-z0-9_]*|feature_[a-z][a-z0-9_]*)$"},
+        "name": {"$ref": "#/$defs/text"}, "front_observation": {"$ref": "#/$defs/text"},
+        "attachment": {"$ref": "#/$defs/text"}, "path": {"$ref": "#/$defs/text"},
+        "occluded_by": {"$ref": "#/$defs/text"}, "source_ids": {"$ref": "#/$defs/ids"},
+        "stages": {
+          "type": "object", "additionalProperties": false, "required": ["back", "left"],
+          "properties": {"back": {"$ref": "#/$defs/view"}, "left": {"$ref": "#/$defs/view"}}
+        }
+      }
+    }
+  }
+}

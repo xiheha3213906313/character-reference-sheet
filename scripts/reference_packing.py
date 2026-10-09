@@ -15,6 +15,9 @@ import review_workflow as workflow
 def substitute(spec, materials):
     """Only the maker's recorded full-coverage judgement can replace a blurry source."""
     result, changes = copy.deepcopy(spec), []
+    require(isinstance(result, dict), 'prompt须为对象')
+    require(isinstance(result.get('references', []), list) and all(isinstance(r, dict) for r in result.get('references', [])),
+            'prompt.references须为对象列表')
     replacements = {m['source_id']: m['covered_by'] for m in materials if m.get('covered_by')}
     for ref in result.get('references', []):
         if ref.get('source_id') in replacements:
@@ -22,6 +25,7 @@ def substitute(spec, materials):
             ref['source_id'] = replacements[old]['source_id']
             changes.append({'removed_source': old, **replacements[old]})
         for panel in ref.get('panels', []):
+            require(isinstance(panel, dict) and isinstance(panel.get('source_id'), str), 'prompt.references[].panels每项须含source_id和crop')
             require(panel['source_id'] not in replacements,
                     '被替代原图的裁切坐标不能套到清晰图；删除该重复局部，或按清晰原图的真实区域更新crop')
     return result, changes

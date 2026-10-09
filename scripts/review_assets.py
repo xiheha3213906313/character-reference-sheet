@@ -101,6 +101,8 @@ def comparison(directory, identifier, panels, kind='comparison', **metadata):
     """Reuse the maintained composer, with at most three useful panels per board."""
     import compose_review
     directory = Path(directory)
+    if kind == 'comparison' and not 2 <= len(panels) <= 3:
+        raise ValueError('验收对照只允许一至两张参考加一张候选；排序使用ranking类型')
     specs = []
     for panel in panels:
         path = Path(panel['file']).resolve()

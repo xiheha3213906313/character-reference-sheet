@@ -179,7 +179,7 @@ class ReferencePackingTest(unittest.TestCase):
             fit(self.root, spec, ['a', 'baseline', 'c'], 1)
 
     def test_only_explicit_fully_covered_exclusions_can_replace_blurry_sources(self):
-        common = {'views': ['front'], 'observation': 'Synthetic visible content.', 'quality': 'Synthetic quality.', 'selection_reason': 'Synthetic selection.'}
+        common = {'views': ['front'], 'accessories': [], 'observation': 'Synthetic visible content.', 'quality': 'Synthetic quality.', 'selection_reason': 'Synthetic selection.'}
         materials = [{**common, 'source_id': 'blur', 'decision': 'exclude', 'uses': [],
                       'covered_by': {'source_id': 'clear', 'reason': 'Synthetic same visible facts, clearer edges.'}},
                      {**common, 'source_id': 'clear', 'decision': 'adopt', 'uses': [

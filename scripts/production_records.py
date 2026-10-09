@@ -49,6 +49,7 @@ def export(root, flow=None, values=None):
                               'visual_review': report_ref(root, review),
                               'review_decision': review.get('decision') if review else None})
         stages.append({'stage': role, 'decision': state['stages'][role]['decision'],
+                       'plan_requires_prepare': bool(state['stages'][role].get('plan_requires_prepare')),
                        'target_sha256': state['stages'][role]['target_sha256'],
                        'dependencies': state['stages'][role]['dependencies'],
                        'targets': brief['checks'][role], 'recipe': choice['recipe'],
@@ -71,6 +72,9 @@ def export(root, flow=None, values=None):
               'created_at': flow['created_at'], 'character': flow.get('character'),
               'source_directory': flow['source_directory'], 'sources': flow['sources'],
               'material_analysis': flow.get('materials', []), 'stages': stages,
+              'accessory_visibility': flow['accessory_visibility'],
+              'front_structure': flow.get('front_structure'),
+              'delivery_override': flow.get('delivery_override'),
               'recipes': recipes, 'requests': list(flow.get('requests', {}).values()), 'delivery': flow.get('delivery'),
               'record_semantics': {'visual_results_are_model_observations': True,
                                    'script_performs_visual_review': False}}
@@ -82,10 +86,16 @@ def export(root, flow=None, values=None):
         m['source_id'], ', '.join(m['views']), m['observation'], m['quality'], m['decision'], m['selection_reason'] +
         ('；清晰替代：' + m['covered_by']['source_id'] + '，' + m['covered_by']['reason'] if m.get('covered_by') else ''),
         '; '.join(u['id'] + ' [' + u['kind'] + ':' + ','.join(u['stages']) + '] ' + u['target'] +
-                  (' crop=' + str(u['crop']) if 'crop' in u else '') for u in m['uses']))) + ' |'
+                  (' crop=' + str(u['crop']) if 'crop' in u else '') for u in m['uses']),
+        '; '.join(a['id'] + ' ' + a['name'] + ' @ ' + a['carrier'] + '/' + a['location'] + ' [' + a['visibility'] + '] ' +
+                  a['observation'] + (' other_views=' + str(a['other_views']) if a.get('other_views') else '') for a in m['accessories']))) + ' |'
         for m in record['material_analysis'])
+    accessory_rows = '\n'.join('| ' + ' | '.join(cell(x) for x in (
+        a['id'] + ' / ' + a['name'], a['carrier'] + ' / ' + a['stages'][role].get('location', a['location']), role,
+        a['stages'][role]['visibility'], ', '.join(a['stages'][role]['source_ids']), a['stages'][role]['reason'])) + ' |'
+        for a in record['accessory_visibility'] for role in ROLES)
     (root / '制作记录/图片选用文档.md').write_text(
-        (templates / 'material-selection.md').read_text(encoding='utf-8').replace('{{rows}}', rows), encoding='utf-8')
+        (templates / 'material-selection.md').read_text(encoding='utf-8').replace('{{rows}}', rows).replace('{{accessory_rows}}', accessory_rows), encoding='utf-8')
     if record['character']:
         c = record['character']
         text = (templates / 'character.md').read_text(encoding='utf-8')

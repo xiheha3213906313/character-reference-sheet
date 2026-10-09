@@ -79,7 +79,7 @@
 
 标注单独复查：线端是否真的指向所属固定点，还是仅指向可见段开头；是否跨到邻件、错误共用起点或连接原本分开的部件。被遮挡的连接不能用一条猜测线画成事实，只标确证的可见段并说明未显示部分。错误辅助图会把错误关系加重，不能因使用原图像素就默认标注正确。
 
-构图验收默认沿用[呈现尺度](presentation.md)：头顶主体和重要头饰完整，飞丝触边允许；特写胸部及以上；左侧朝画面左且接近侧面。生成模板额外写略微拉远和最高重要轮廓上方留明显空白，避免贴顶；不把这个生成缓冲变成验收的固定边距门槛。源图头发模糊、面部脏污按固定质量句恢复有依据的清晰结构；具体污染区域或恢复证据填 `quality_notes`。
+构图验收默认沿用[呈现尺度](presentation.md)：头顶主体和重要头饰完整，飞丝触边允许；特写胸部及以上；左侧朝画面左且接近侧面。生成模板额外写略微拉远和最高重要轮廓上方留明显空白，避免贴顶；不把这个生成缓冲变成验收的固定边距门槛。眼部默认使用固定EYES模板；闭眼来源只记观察，瞳孔未知按当前风格自动补全并在后续沿用所选特写。源图头发模糊、面部脏污按固定质量句恢复有依据的清晰结构；具体污染区域或恢复证据填 `quality_notes`。
 
 默认每阶段最多六次真实生图调用，包含追加、编辑和工具失败，跨配方累计。先修具体根因；达到上限由制作模型选优，不通过加严提示词反复追抽。
 
@@ -102,7 +102,7 @@ python -X utf8 "<技能目录>/scripts/build_prompt.py" "<提示词底稿.json>"
 | 约束的`kind`与来源 | `shape/extent/layer/material/spatial`；来源为真实有序输入的1基序号，不能指向缺失图片 |
 | 延伸件`extent` | `visibility`可选`complete`（默认）或`partial`；完整入画另需`attachment/path/end_anchor/frame_behavior`，部分入画只必需`path/frame_behavior`，连接或终点确实影响画内时才补对应字段；完全画外件不加入约束 |
 | 可选 `allowed_changes` / `quality_notes` | 本次角色特有的允许调整列表、具体污染恢复目标；追加到通用模板，不能用来重写构图、呈现或通用质量 |
-| 可选 `user_overrides` | 仅用户明确要求覆盖时填写。允许键`aspect_ratio/framing_required/framing_preferred/lighting/expression/background`，每项严格为`{"value":"实际目标","user_quote":"用户原话"}`；替换对应默认项，不叠加旧目标 |
+| 可选 `user_overrides` | 仅用户明确要求覆盖时填写。允许键`aspect_ratio/framing_required/framing_preferred/lighting/expression/eyes/background`，每项严格为`{"value":"实际目标","user_quote":"用户原话"}`；替换对应默认项，不叠加旧目标 |
 | 可选 `background_mode` | 默认`transparent`；能力受限用`white`时须写非空`background_fallback_reason`；用户另指定背景走带原话的覆盖 |
 | 可选 `corrections` / 参考的`guide` | 常见上视修复为`["gaze_up"]`，只用于特写/正面；guide支持`front_material/back_silhouette/rear_design/structure_silhouette/rear_layers/edit_annotation`，必须关联实际传入的对应辅助图 |
 | `edit`追加字段 | `baseline_reference`为1基底图序号，`edit_target`为本次实际目标 |

@@ -14,7 +14,7 @@ import sheet_flow as api
 import production_delivery as delivery
 from production_records import FLOW, RECORD
 import review_workflow as workflow
-from review_v2 import read, digest
+from review_v2 import read, digest, validate_generation_context, check_v2, stage_budget
 
 
 class SheetFlowTest(unittest.TestCase):
@@ -43,7 +43,7 @@ class SheetFlowTest(unittest.TestCase):
             config.update(character={'name': '测试角色', 'height_cm': 163, 'age_years': 19,
                                      'appearance': 'Synthetic appearance.', 'outfit': 'Synthetic white jacket and black shirt.',
                                      'outfit_name': '白外套测试造型', 'setting_basis': 'Synthetic test fixture values, not estimated facts.'},
-                          materials=[{'source_id': 's001', 'views': ['detail'], 'observation': 'Synthetic source observation | with newline\nfor template escaping.',
+                          accessory_visibility=[], materials=[{'source_id': 's001', 'accessories': [], 'views': ['detail'], 'observation': 'Synthetic source observation | with newline\nfor template escaping.',
                                       'quality': 'Synthetic region quality and limits.', 'selection_reason': 'Synthetic complementary identity evidence.',
                                       'decision': 'adopt', 'uses': [{'id': 'identity_source', 'kind': 'identity', 'stages': ['head'], 'target': 'Synthetic identity/design evidence.'}]}])
         return config
@@ -71,16 +71,22 @@ class SheetFlowTest(unittest.TestCase):
             'viewed_evidence_ids': [response['comparisons'][0]['id']],
             **({'issue_key': 'synthetic_shoulder'} if result == 'fail' else {})})
 
+    def packet(self, response, role='head'):
+        call = next(c for c in workflow.load_all(self.root)[2]['stages'][role]['attempts'] if c['id'] == response['call_id'])
+        return read(self.root / call['packet_file'])
+
     def report(self, response, role='head', result='pass', mode='subagent'):
         handoff = response['reviewer_handoff']
         packet = read(self.root / handoff['packet_file'])
         report = read(self.root / handoff['report_template_file'])
-        report['reviewer'] = {'mode': mode, 'model': 'inherited', 'agent_id': 'synthetic-reviewer'}
+        report['reviewer'] = {'mode': mode, 'model': 'inherited', 'agent_id': 'synthetic-reviewer' if role == 'head' else 'synthetic-reviewer-' + role}
         if mode == 'self':
             report['reviewer'].update(reason_code='user_disabled', reason='Synthetic user prohibition.')
         viewed = set()
         for goal, item in zip(packet['checks'], report['checks']):
             ids = {'native_quality': ['native_001'], 'reduced_quality': ['reduced'], 'background': ['alpha_compare']}.get(goal['group'], ['compare_001'])
+            if goal['group'] in ('identity', 'design', 'spatial') and goal.get('reference_display') != 'context_only':
+                ids = [a['id'] for a in packet['evidence'] if a['kind'] == 'comparison' and set(a.get('source_ids', [])) & set(goal['source_ids'])]
             viewed.update(ids)
             item.update(result=result, reference_observation='Synthetic reference fact for plumbing only.',
                         candidate_observation='Synthetic candidate fact for plumbing only.',
@@ -107,8 +113,27 @@ class SheetFlowTest(unittest.TestCase):
         else:
             comparison = self.receive(self.baseline(role), role)
         board = comparison['ranking_board']
-        return api.rank(self.root, role, {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic baseline preference.',
+        result = api.rank(self.root, role, {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic baseline preference.',
                                          'board_sha256': board['sha256']})
+        if role == 'front':
+            result = self.structure(result)
+        return result
+
+    def structure(self, response):
+        from spatial_plan import record
+        config = read(Path(response['config_file']))
+        flow = read(self.root / FLOW)
+        rear = [m['source_id'] for m in flow['materials'] if set(m['views']) & {'back', 'rear_oblique'}]
+        for item in config['items']:
+            item.update(front_observation='Synthetic selected front observation.', attachment='Synthetic actual attachment.',
+                        path='Synthetic front-to-side route.', occluded_by='Synthetic shoulder occlusion.')
+            for role, view in item['stages'].items():
+                original = next((a['stages'][role] for a in flow['accessory_visibility'] if item['id'] == 'accessory_' + a['id']), None)
+                view.update(visibility=original['visibility'] if original and original['visibility'] != 'out_of_frame' else 'unclear',
+                            visible_portion='Synthetic applicable visible segment.', hidden_portion='Synthetic hidden segment.',
+                            reason='Synthetic relation evidence, no actual visual claim.',
+                            source_ids=list(dict.fromkeys(['front_selected'] + rear + (original['source_ids'] if original else []))))
+        return record(self.root, config)
 
     def test_start_records_are_fixed_pending_and_markdown_is_derived(self):
         self.assertEqual('forbidden_during_production', self.start_response['source_access'])
@@ -125,6 +150,9 @@ class SheetFlowTest(unittest.TestCase):
     def test_prepare_reuses_single_semantic_input_for_prompt_targets_and_documents(self):
         request = api.prepare(self.root, 'head', self.config())
         self.assertEqual('generate', request['next_action'])
+        self.assertEqual(1, request['tool_call_count'])
+        self.assertEqual(request['tool_call_count'], len(request['requests']))
+        self.assertNotIn('并行发出', request['instruction'])
         record = read(self.root / RECORD)
         design = next(g for g in record['stages'][0]['targets'] if g['group'] == 'design')
         self.assertEqual(self.config()['prompt']['critical_constraints'][0]['statement'], design['target'])
@@ -141,8 +169,352 @@ class SheetFlowTest(unittest.TestCase):
         extra = api.review(self.root, 'head', self.report(handoff))
         self.assertEqual('generate_parallel', extra['next_action'])
         self.assertEqual(2, len(extra['requests']))
+        self.assertEqual(2, extra['tool_call_count'])
         self.assertEqual(extra['requests'][0]['arguments'], extra['requests'][1]['arguments'])
         self.assertEqual('transparent', read(self.root / handoff['packet_file'])['background_policy']['mode'])
+
+    def test_bad_constraint_list_returns_actionable_error_before_generation(self):
+        config = self.config()
+        config['prompt']['critical_constraints'] = ['Invalid free-form constraint.']
+        before = (self.root / FLOW).read_bytes()
+        with self.assertRaisesRegex(ValueError, 'prompt.critical_constraints.*对象列表'):
+            api.prepare(self.root, 'head', config)
+        self.assertEqual(before, (self.root / FLOW).read_bytes())
+
+    def test_raw_tool_receipt_and_other_image_formats_preserve_pixels_and_call_id(self):
+        request = api.prepare(self.root, 'head', self.config())
+        self.assertTrue(Path(request['receipt_config_file']).is_absolute())
+        self.assertIn(str(self.root), request['submit_command'])
+        original = self.base / 'provider arbitrary name.jpeg'
+        Image.new('RGB', (36, 48), (112, 104, 97)).save(original)
+        item = request['requests'][0]
+        raw = {'content': [{'type': 'text', 'text': 'Saved under ' + str(self.base) + ' as ' + str(original) + ' by default.'}]}
+        response = api.receive(self.root, 'head', {'calls': [
+            {'request_id': item['request_id'], 'tool_call_id': 'provider-call:arbitrary/123', 'result': raw}]})
+        call = workflow.load_all(self.root)[2]['stages']['head']['attempts'][0]
+        receipt = read(self.root / call['evidence_file'])
+        self.assertEqual(raw, receipt['raw_receipt'])
+        self.assertEqual('provider-call:arbitrary/123', receipt['actual_tool_call_id'])
+        self.assertEqual('JPEG', receipt['original_output']['format'])
+        self.assertEqual(digest(original), digest(self.root / receipt['original_output']['archive_file']))
+        with Image.open(original) as source, Image.open(self.root / call['output']['file']) as working:
+            self.assertEqual(source.convert('RGBA').tobytes(), working.convert('RGBA').tobytes())
+        self.assertEqual('self-check', response['next_action'])
+        self.assertEqual('unreviewed', workflow.load_all(self.root)[1]['stages']['head']['decision'])
+
+    def test_ambiguous_receipt_or_missing_id_is_not_guessed_or_counted(self):
+        request = api.prepare(self.root, 'head', self.config())
+        identifier = request['requests'][0]['request_id']
+        one, two = self.image(), self.image()
+        before = (self.root / FLOW).read_bytes()
+        with self.assertRaisesRegex(ValueError, '唯一'):
+            api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'tool_call_id': 'arbitrary',
+                                                    'result': {'images': [{'path': str(one)}, {'path': str(two)}]}}]})
+        with self.assertRaisesRegex(ValueError, '真实tool_call_id'):
+            api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'output': str(one)}]})
+        self.assertEqual(before, (self.root / FLOW).read_bytes())
+
+    def test_provider_argument_mapping_is_frozen_and_used_by_review_context(self):
+        config = self.config()
+        config.update(tool='other-provider.render', parameters={'background': 'transparent'},
+                      argument_fields={'prompt': 'description', 'references': 'input_files'})
+        request = api.prepare(self.root, 'head', config)
+        args = request['requests'][0]['arguments']
+        self.assertEqual({'description', 'input_files', 'background'}, set(args))
+        simple = self.receive(request)
+        packet = self.packet(simple)
+        self.assertEqual(config['argument_fields'], packet['generation_context']['argument_fields'])
+        validate_generation_context(packet, self.root)
+        extra = api.review(self.root, 'head', self.report(self.simple(simple)))
+        self.assertEqual(2, extra['tool_call_count'])
+        self.assertEqual(args, extra['requests'][0]['arguments'])
+        self.assertEqual(args, extra['requests'][1]['arguments'])
+
+    def test_missing_external_id_records_raw_receipt_without_chat_lookup(self):
+        request = api.prepare(self.root, 'head', self.config())
+        identifier = request['requests'][0]['request_id']
+        image = self.image()
+        raw = {'savedPath': str(image)}
+        response = api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'tool_call_id': None, 'result': raw}]})
+        receipt = read(self.root / f'制作记录/调用记录/{identifier}-receipt.json')
+        self.assertIsNone(receipt['actual_tool_call_id'])
+        self.assertEqual('unavailable_in_current_receipt', receipt['tool_call_id_status'])
+        self.assertEqual(raw, receipt['raw_receipt'])
+        self.assertEqual('self-check', response['next_action'])
+        self.assertEqual(1, len(workflow.load_all(self.root)[2]['stages']['head']['attempts']))
+        self.assertEqual('unreviewed', workflow.load_all(self.root)[1]['stages']['head']['decision'])
+
+    def test_conflicting_external_ids_and_reused_output_fail_before_batch_writes(self):
+        request = api.prepare(self.root, 'head', self.config())
+        identifier = request['requests'][0]['request_id']
+        before = (self.root / FLOW).read_bytes()
+        with self.assertRaisesRegex(ValueError, '编号冲突'):
+            api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'tool_call_id': 'actual-A',
+                'result': {'tool_call_id': 'actual-B', 'savedPath': str(self.image())}}]})
+        self.assertEqual(before, (self.root / FLOW).read_bytes())
+        simple = self.receive(request)
+        extras = api.review(self.root, 'head', self.report(self.simple(simple)))
+        image = self.image()
+        with self.assertRaisesRegex(ValueError, '同一个工具输出文件'):
+            api.receive(self.root, 'head', {'calls': [{'request_id': r['request_id'], 'result': {'savedPath': str(image)}}
+                                                    for r in extras['requests']]})
+        self.assertFalse((self.root / f'制作记录/调用记录/{extras["requests"][0]["request_id"]}-receipt.json').exists())
+        ranked = api.receive(self.root, 'head', {'calls': [{'request_id': r['request_id'], 'result': {'savedPath': str(self.image())}}
+                                                        for r in extras['requests']]})
+        self.assertEqual('rank', ranked['next_action'])
+
+    def test_requests_and_pending_action_templates_are_ready_and_status_is_read_only(self):
+        request = api.prepare(self.root, 'head', self.config())
+        saved = read(Path(request['requests_file']))
+        self.assertEqual(request['requests'][0]['arguments'], saved['requests'][0]['arguments'])
+        simple = self.receive(request)
+        config = read(Path(simple['config_file']))
+        self.assertEqual('pending', config['result'])
+        self.assertEqual([], config['viewed_evidence_ids'])
+        self.assertEqual(simple['review_token'], config['review_token'])
+        before = {p: digest(p) for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(simple, api.advance(self.root, 'head', mutate=False))
+        self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
+        handoff = self.simple(simple)
+        self.assertIn(str(self.root / handoff['reviewer_handoff']['packet_file']), handoff['reviewer_handoff']['task'])
+        self.assertIn('generation_context.prompt', handoff['reviewer_handoff']['task'])
+        rank = self.receive(api.review(self.root, 'head', self.report(handoff)))
+        config = read(Path(rank['config_file']))
+        self.assertEqual('', config['preferred_call'])
+        self.assertEqual(rank['ranking_board']['sha256'], config['board_sha256'])
+        self.assertTrue(Path(rank['config_file']).is_absolute())
+
+    def test_first_plan_reports_all_future_rear_route_errors_without_mutation(self):
+        Image.new('RGB', (36, 48), (90, 60, 40)).save(self.sources / 'z-rear.png')
+        self.root = self.base / 'all-route-errors'
+        api.start(self.root, self.sources)
+        config = self.config()
+        config['materials'][0]['views'] = ['front']
+        config['materials'][0]['uses'].extend([
+            {'id': 'front_hair_design', 'kind': 'design', 'stages': ['front', 'back', 'left'], 'target': 'Synthetic front hair design.'},
+            {'id': 'front_shoe_design', 'kind': 'design', 'stages': ['front', 'back', 'left'], 'target': 'Synthetic front shoes.'}])
+        config['materials'].append({'source_id': 's002', 'views': ['back'], 'accessories': [], 'observation': 'Synthetic rear.',
+            'quality': 'Synthetic rear readable.', 'decision': 'adopt', 'selection_reason': 'Synthetic rear structure.',
+            'uses': [{'id': 'rear_design', 'kind': 'design', 'stages': ['back'], 'target': 'Synthetic actual rear design.'}]})
+        before = {p: digest(p) for p in self.root.rglob('*') if p.is_file()}
+        from material_plan import PlanError
+        with self.assertRaises(PlanError) as caught:
+            api.prepare(self.root, 'head', config)
+        self.assertEqual(2, len(caught.exception.field_errors))
+        self.assertEqual({'front_hair_design', 'front_shoe_design'}, {e['use_id'] for e in caught.exception.field_errors})
+        self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
+
+    def test_update_plan_invalidates_affected_approval_without_generating_or_resetting_budget(self):
+        config = self.config()
+        config['materials'][0]['uses'].append({'id': 'front_surface', 'kind': 'material', 'stages': ['front'],
+                                               'target': 'Synthetic original front material.'})
+        rank = self.receive(self.baseline(config=config))
+        api.rank(self.root, 'head', {'preferred_call': rank['ranking_board']['call_ids'][0], 'reason': 'Synthetic choice.',
+                                   'board_sha256': rank['ranking_board']['sha256']})
+        self.finish_stage('front')
+        before = read(self.root / FLOW)
+        old_head = workflow.load_all(self.root)[1]['stages']['head'].copy()
+        config['materials'][0]['uses'][1]['target'] = 'Synthetic changed front material.'
+        result = api.update_plan(self.root, 'back', config)
+        self.assertEqual(['front'], result['affected_prepared_stages'])
+        self.assertEqual('front', result['stage'])
+        self.assertEqual(before['requests'], read(self.root / FLOW)['requests'])
+        self.assertEqual(old_head, workflow.load_all(self.root)[1]['stages']['head'])
+        self.assertFalse(check_v2(workflow.load_all(self.root)[1], self.root, before='back')['downstream_ready'])
+        old_call = workflow.load_all(self.root)[2]['stages']['front']['attempts'][0]
+        with self.assertRaisesRegex(ValueError, '旧简评、复核或排序不能恢复批准'):
+            api.simple_check(self.root, 'front', {'call_id': old_call['id'], 'review_token': old_call['packet_sha256'],
+                'result': 'pass', 'observation': 'Synthetic old-target observation.', 'viewed_evidence_ids': ['compare_001']})
+        self.assertFalse(check_v2(workflow.load_all(self.root)[1], self.root, before='back')['downstream_ready'])
+        followup = read(Path(result['config_file']))
+        self.assertNotIn('materials', followup)
+        self.assertEqual(3, stage_budget('front', workflow.load_all(self.root)[2]['stages']['front'], workflow.load_all(self.root)[3])['call_count'])
+        api.prepare(self.root, 'front', followup)
+        self.assertEqual(3, stage_budget('front', workflow.load_all(self.root)[2]['stages']['front'], workflow.load_all(self.root)[3])['call_count'])
+
+    def test_structured_tool_failure_without_external_id_is_counted_as_failure(self):
+        request = api.prepare(self.root, 'head', self.config())
+        identifier = request['requests'][0]['request_id']
+        raw = {'isError': True, 'content': [{'type': 'text', 'text': 'Synthetic actual provider failure.'}]}
+        api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'result': raw}]})
+        receipt = read(self.root / f'制作记录/调用记录/{identifier}-receipt.json')
+        self.assertEqual(raw, receipt['error'])
+        self.assertIsNone(receipt['original_output'])
+
+    def test_explicit_output_selects_from_raw_receipt_without_losing_provenance(self):
+        request = api.prepare(self.root, 'head', self.config())
+        identifier = request['requests'][0]['request_id']
+        one, two = self.image(), self.image()
+        raw = {'images': [{'path': str(one)}, {'path': str(two)}]}
+        api.receive(self.root, 'head', {'calls': [{'request_id': identifier, 'result': raw, 'output': str(two)}]})
+        receipt = read(self.root / f'制作记录/调用记录/{identifier}-receipt.json')
+        self.assertEqual(raw, receipt['raw_receipt'])
+        self.assertEqual(str(two.resolve()), receipt['output'])
+        self.assertIsNone(receipt['actual_tool_call_id'])
+        with self.assertRaisesRegex(ValueError, '原始result列出的'):
+            from tool_receipts import normalize
+            normalize(self.root, {'request_id': 'synthetic-selector', 'result': raw, 'output': str(self.image())})
+
+    def test_stage_transition_returns_prepared_config_and_command(self):
+        self.assertIn(str(self.root), self.start_response['submit_command'])
+        result = self.finish_stage('head')
+        self.assertEqual('front', result['next_stage'])
+        config = read(Path(result['config_file']))
+        self.assertEqual('head', config['prompt']['references'][0]['stage'])
+        self.assertEqual('', config['prompt']['identity'])
+        self.assertEqual([], config['prompt']['critical_constraints'])
+        request = api.prepare(self.root, 'front', config)
+        self.assertEqual('generate', request['next_action'])
+
+    def test_edited_plan_file_requires_explicit_update_before_next_stage(self):
+        config = self.config()
+        rank = self.receive(self.baseline(config=config))
+        api.rank(self.root, 'head', {'preferred_call': rank['ranking_board']['call_ids'][0], 'reason': 'Synthetic choice.',
+                                   'board_sha256': rank['ranking_board']['sha256']})
+        file = self.root / '制作记录/阶段输入/首次准备.json'
+        config['materials'][0]['uses'].append({'id': 'rear_surface', 'kind': 'material', 'stages': ['back'],
+                                               'target': 'Synthetic new rear material fact.'})
+        workflow.write(file, config)
+        self.assertFalse(any(u['id'] == 'rear_surface' for u in read(self.root / FLOW)['materials'][0]['uses']))
+        before = read(self.root / FLOW)['requests']
+        config.update(generation_limit=99, parameters={'synthetic': 'ignored by shared-plan update'})
+        workflow.write(file, config)
+        result = api.update_plan(self.root, 'back', read(file), file)
+        self.assertEqual([], result['affected_prepared_stages'])
+        self.assertEqual(before, read(self.root / FLOW)['requests'])
+        self.assertTrue(any(u['id'] == 'rear_surface' for u in read(self.root / FLOW)['materials'][0]['uses']))
+        self.assertEqual('approved', workflow.load_all(self.root)[1]['stages']['head']['decision'])
+        self.assertEqual(6, workflow.load_all(self.root)[2]['stages']['head']['generation_limit'])
+
+    def test_update_plan_rejects_bad_fields_without_saving_shared_facts(self):
+        config = self.config()
+        self.receive(api.prepare(self.root, 'head', config))
+        before = {p: digest(p) for p in self.root.rglob('*') if p.is_file()}
+        config['materials'][0]['quality'] = ''
+        with self.assertRaisesRegex(ValueError, 'quality'):
+            api.update_plan(self.root, 'front', config)
+        self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
+
+    def test_review_expands_generation_packs_and_shows_each_reference_once(self):
+        for index, color in enumerate([(70, 50, 90), (110, 70, 80), (140, 110, 95)], 1):
+            Image.new('RGB', (25 + index, 40), color).save(self.sources / ('detail-' + str(index) + '.png'))
+        self.root = self.base / 'flat-review-project'
+        start = api.start(self.root, self.sources)
+        config = self.config()
+        config['prompt']['references'] = []
+        config['prompt']['critical_constraints'] = []
+        config['materials'] = [
+            {'source_id': source['source_id'], 'accessories': [], 'views': ['detail'], 'observation': 'Synthetic distinct detail.',
+             'quality': 'Synthetic usable detail.', 'decision': 'adopt', 'selection_reason': 'Synthetic complementary fact.',
+             'uses': [{'id': 'detail_' + source['source_id'], 'kind': 'design', 'stages': ['head'],
+                       'target': 'Synthetic distinct design ' + source['source_id']}]} for source in start['sources']]
+        request = api.prepare(self.root, 'head', config)
+        simple = self.receive(request)
+        packet = self.packet(simple)
+        boards = [a for a in packet['evidence'] if a['kind'] == 'comparison']
+        self.assertEqual(2, len(boards))
+        refs = [panel['sha256'] for board in boards for panel in board['panels'][:-1]]
+        self.assertEqual(4, len(refs))
+        self.assertEqual(4, len(set(refs)))
+        self.assertTrue(all(2 <= len(b['panels']) <= 3 for b in boards))
+        self.assertTrue(all(not k.startswith('aux_') for g in packet['checks'] for k in g['source_ids']))
+        for board in boards:
+            self.assertTrue(board['check_ids'])
+        self.assertEqual({b['id'] for b in boards}, {b['id'] for b in simple['comparisons']})
+
+    def test_relative_config_resolves_from_root_independent_of_process_directory(self):
+        config = self.root / '制作记录/阶段输入/root-config.json'
+        workflow.write(config, self.config())
+        result = subprocess.run([sys.executable, '-B', '-X', 'utf8', str(Path(api.__file__)), 'prepare',
+                                 '--root', str(self.root), '--config', '制作记录/阶段输入/root-config.json'],
+                                cwd=str(self.base), capture_output=True, encoding='utf-8')
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertEqual('generate', json.loads(result.stdout)['next_action'])
+
+    def test_accessory_summary_adds_explicit_back_absence_despite_front_material_input(self):
+        Image.new('RGB', (36, 48), (85, 76, 109)).save(self.sources / 'z-rear.png')
+        self.root = self.base / 'accessory-project'
+        start = api.start(self.root, self.sources)
+        config = self.config()
+        accessory = {'id': 'bag_charm', 'name': 'Synthetic bag charm', 'carrier': 'Synthetic bag',
+                     'location': 'outer decorated face', 'visibility': 'visible', 'observation': 'Synthetic front-facing charm.',
+                     'other_views': {'back': 'possibly_hidden'}}
+        config['materials'][0]['views'] = ['front']
+        config['materials'][0]['accessories'] = [accessory]
+        rear = copy.deepcopy(config['materials'][0])
+        rear.update(source_id='s002', views=['back'])
+        rear['uses'][0].update(id='rear_evidence', target='Synthetic rear visible design.')
+        rear['accessories'] = [{**accessory, 'visibility': 'not_visible', 'observation': 'Synthetic rear face has no visible charm.', 'other_views': {}}]
+        config['materials'].append(rear)
+        plan = {k: accessory[k] for k in ('id', 'name', 'carrier', 'location')}
+        plan['stages'] = {role: {'visibility': state, 'source_ids': [source], 'reason': reason} for role, state, source, reason in (
+            ('head', 'out_of_frame', 's001', 'Synthetic bag below head framing.'),
+            ('front', 'visible', 's001', 'Synthetic front charm visible.'),
+            ('back', 'not_visible', 's002', 'Synthetic clear rear bag face is plain.'),
+            ('left', 'unclear', 's001', 'Synthetic side visibility not resolved.'))}
+        config['accessory_visibility'] = [plan]
+        extra = self.baseline(config=config)
+        ranked = self.receive(extra)
+        board = ranked['ranking_board']
+        api.rank(self.root, 'head', {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic baseline preference.', 'board_sha256': board['sha256']})
+        self.finish_stage('front')
+        back_config = self.config('back')
+        back_config['prompt']['critical_constraints'][0]['kind'] = 'material'
+        request = api.prepare(self.root, 'back', back_config)
+        prompt = request['requests'][0]['arguments']['prompt']
+        self.assertIn('不存在Synthetic bag charm', prompt)
+        self.assertIn('即使传入的正面或其他参考显示该饰品', prompt)
+        simple = self.receive(request, 'back')
+        packet = self.packet(simple, 'back')
+        goal = next(g for g in packet['checks'] if g['id'] == 'design_visibility_bag_charm')
+        self.assertIn('不存在Synthetic bag charm', goal['target'])
+        mapping = read(self.root / FLOW)['stages']['back']['review_reference_map']
+        self.assertEqual({leaf for key in ('structure_front_selected', 'structure_s002') for leaf in mapping[key]}, set(goal['source_ids']))
+        self.assertTrue(any(r.get('guide') == 'front_material' for r in packet['generation_context']['references']))
+        record = read(self.root / RECORD)
+        self.assertEqual('possibly_hidden', record['material_analysis'][0]['accessories'][0]['other_views']['back'])
+        self.assertEqual('not_visible', record['accessory_visibility'][0]['stages']['back']['visibility'])
+        self.assertIn('bag_charm', (self.root / '制作记录/图片选用文档.md').read_text(encoding='utf-8'))
+
+        review = self.simple(simple, 'back')
+        ranked = self.receive(api.review(self.root, 'back', self.report(review, 'back')), 'back')
+        board = ranked['ranking_board']
+        api.rank(self.root, 'back', {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic baseline preference.', 'board_sha256': board['sha256']})
+        head_binding = workflow.load_all(self.root)[1]['stages']['head']['target_sha256']
+        requests_before = len(read(self.root / FLOW)['requests'])
+        changed = copy.deepcopy(config)
+        changed['accessory_visibility'][0]['stages']['back'].update(visibility='visible', reason='Synthetic newly adopted rear visibility.')
+        changed['materials'][1]['accessories'][0].update(visibility='visible', observation='Synthetic newly visible rear charm evidence.')
+        self.assertEqual('prepare_next_stage', api.prepare(self.root, 'head', changed)['next_action'])
+        self.assertEqual(requests_before, len(read(self.root / FLOW)['requests']))
+        self.assertEqual(head_binding, workflow.load_all(self.root)[1]['stages']['head']['target_sha256'])
+        stale = api.advance(self.root, 'back', mutate=False)
+        self.assertEqual('prepare', stale['next_action'])
+        self.assertTrue(Path(stale['config_file']).is_absolute())
+        self.assertIn('旧批准已失效', stale['instruction'])
+        from review_gate import check
+        self.assertFalse(check(workflow.load_all(self.root)[1], self.root, stage='back')['recorded_approval_valid'])
+        invalid = copy.deepcopy(back_config)
+        invalid['accessory_visibility'] = copy.deepcopy(changed['accessory_visibility'])
+        invalid['accessory_visibility'][0]['stages']['head']['reason'] = 'Synthetic upstream change.'
+        before = (self.root / FLOW).read_bytes()
+        with self.assertRaisesRegex(ValueError, '上游目标'):
+            api.prepare(self.root, 'back', invalid)
+        self.assertEqual(before, (self.root / FLOW).read_bytes())
+
+    def test_accessory_summary_cannot_omit_observed_accessory_or_use_initial_guess_as_final(self):
+        config = self.config()
+        config['materials'][0]['accessories'] = [{'id': 'ribbon', 'name': 'Synthetic ribbon', 'carrier': 'Synthetic headwear',
+                                                 'location': 'Synthetic attachment', 'visibility': 'visible',
+                                                 'observation': 'Synthetic observed ribbon.'}]
+        with self.assertRaisesRegex(ValueError, '覆盖全部'):
+            api.prepare(self.root, 'head', config)
+        item = {k: config['materials'][0]['accessories'][0][k] for k in ('id', 'name', 'carrier', 'location')}
+        item['stages'] = {role: {'visibility': 'possibly_hidden', 'source_ids': ['s001'], 'reason': 'Synthetic initial guess.'} for role in ('head', 'front', 'back', 'left')}
+        config['accessory_visibility'] = [item]
+        with self.assertRaisesRegex(ValueError, '不接受possibly_hidden'):
+            api.prepare(self.root, 'head', config)
+        self.assertEqual({}, read(self.root / FLOW)['requests'])
 
     def test_extras_must_be_received_together_and_remain_unreviewed(self):
         extra = self.baseline()
@@ -246,21 +618,108 @@ class SheetFlowTest(unittest.TestCase):
         calls = [{'request_id': r['request_id'], 'tool_call_id': 'synthetic-bad-batch-' + str(i),
                   'output': str(self.image() if i == 0 else self.base / 'missing.png')}
                  for i, r in enumerate(response['requests'])]
-        with self.assertRaises(OSError):
+        with self.assertRaises((OSError, ValueError)):
             api.receive(self.root, 'head', {'calls': calls})
         self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
 
     def test_changed_recipe_history_remains_resolvable(self):
         first = self.receive(api.prepare(self.root, 'head', self.config()))
+        first_packet = self.packet(first)
         self.simple(first, result='fail')
         revised = self.config()
         revised['prompt']['quality_notes'] = 'Synthetic targeted repair.'
-        api.prepare(self.root, 'head', revised)
+        second_request = api.prepare(self.root, 'head', revised)
+        second = self.receive(second_request)
+        second_packet = self.packet(second)
+        self.assertEqual(second_request['requests'][0]['arguments']['prompt'], second_packet['generation_context']['prompt'])
+        self.assertNotEqual(first_packet['generation_context']['recipe_sha256'], second_packet['generation_context']['recipe_sha256'])
+        validate_generation_context(first_packet, self.root)
         record = read(self.root / RECORD)
         self.assertEqual(2, len(record['recipes']))
         call = record['stages'][0]['calls'][0]
         self.assertIn(call['recipe_sha256'], record['recipes'])
         self.assertEqual(call['review_packet']['sha256'], digest(self.root / call['review_packet']['file']))
+
+    def test_review_context_contains_exact_prompt_order_and_no_maker_answer(self):
+        request = api.prepare(self.root, 'head', self.config())
+        response = self.receive(request)
+        packet = self.packet(response)
+        context = packet['generation_context']
+        self.assertEqual('recorded', context['status'])
+        self.assertEqual(request['requests'][0]['arguments']['prompt'], context['prompt'])
+        recipe = read(self.root / RECORD)['stages'][0]['recipe']
+        self.assertEqual(recipe['inputs'], [{k: v for k, v in r.items() if k != 'index'} for r in context['references']])
+        self.assertEqual([1], [r['index'] for r in context['references']])
+        self.assertNotIn('self_check', context)
+        self.assertNotIn('recommended', context)
+        self.assertTrue(all(g['evaluation_scope'] for g in packet['checks'] if g['group'] == 'design'))
+        validate_generation_context(packet, self.root, context['recipe_sha256'])
+
+    def test_review_context_rejects_changed_prompt_purpose_order_or_bytes(self):
+        response = self.receive(api.prepare(self.root, 'head', self.config()))
+        packet = self.packet(response)
+        for field, value in [('prompt', 'A fabricated replacement prompt.'), ('purpose', 'A fabricated replacement purpose.'), ('index', 2)]:
+            changed = copy.deepcopy(packet)
+            if field == 'prompt':
+                changed['generation_context'][field] = value
+            else:
+                changed['generation_context']['references'][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_generation_context(changed, self.root)
+        prompt_file = self.root / packet['generation_context']['prompt_file']
+        prompt_file.write_text('Changed actual prompt bytes.', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '真实提示词不一致'):
+            validate_generation_context(packet, self.root)
+
+    def test_side_reference_routes_headwear_without_requiring_side_face_in_head(self):
+        Image.new('RGB', (30, 50), (70, 30, 90)).save(self.sources / 'side.png')
+        self.root = self.base / 'side-reference-production'
+        api.start(self.root, self.sources)
+        config = self.config()
+        config['materials'].append({'source_id': 's002', 'accessories': [], 'views': ['side'],
+            'observation': 'Synthetic side face and headwear visible.', 'quality': 'Synthetic clear headwear.',
+            'decision': 'adopt', 'selection_reason': 'Synthetic complementary headwear attachment.',
+            'uses': [{'id': 'side_headwear', 'kind': 'design', 'stages': ['head'], 'target': 'Synthetic headwear shape and attachment.'},
+                     {'id': 'side_face', 'kind': 'identity', 'stages': ['left'], 'target': 'Synthetic side nose and lip contour.'}]})
+        request = api.prepare(self.root, 'head', config)
+        packet = self.packet(self.receive(request))
+        self.assertIn('Synthetic headwear shape and attachment.', packet['generation_context']['prompt'])
+        self.assertNotIn('Synthetic side nose and lip contour.', packet['generation_context']['prompt'])
+        targets = {g['id']: g for g in packet['checks']}
+        self.assertIn('design_planned_side_headwear', targets)
+        self.assertNotIn('design_planned_side_face', targets)
+        self.assertIn(api.prompt_templates.REFERENCE_SCOPE, targets['design_planned_side_headwear']['evaluation_scope'])
+
+    def test_closed_eye_observation_gets_open_eye_target_and_handoff_without_extra_call(self):
+        config = self.config()
+        config['materials'][0]['observation'] = 'Synthetic source: closed eyes, iris not visible.'
+        config['materials'][0]['uses'][0]['target'] = 'Synthetic face shape and white eyelashes.'
+        request = api.prepare(self.root, 'head', config)
+        self.assertEqual(1, request['tool_call_count'])
+        self.assertIn(api.prompt_templates.EYES, request['requests'][0]['arguments']['prompt'])
+        response = self.receive(request)
+        packet = self.packet(response)
+        gaze = next(g for g in packet['checks'] if g.get('aspect') == 'gaze')
+        self.assertIn(api.prompt_templates.EYES, gaze['target'])
+        self.assertIn(api.prompt_templates.EYE_ACCEPTANCE, packet['acceptance_standard'])
+        identity = next(g for g in packet['checks'] if g['group'] == 'identity')
+        self.assertIn(api.prompt_templates.EYE_ACCEPTANCE, identity['evaluation_scope'])
+        record = read(self.root / RECORD)
+        self.assertEqual(config['materials'][0]['observation'], record['material_analysis'][0]['observation'])
+        self.assertEqual(1, len(record['requests']))
+        self.assertIsNone(record['stages'][0]['calls'][0]['visual_review'])
+
+    def test_user_eye_override_is_shared_by_prompt_and_review_target(self):
+        config = self.config()
+        override = {'value': 'Synthetic user-specified closed-eye design.', 'user_quote': 'Synthetic explicit closed-eye request.'}
+        config['prompt']['user_overrides'] = {'eyes': override}
+        request = api.prepare(self.root, 'head', config)
+        self.assertNotIn(api.prompt_templates.EYES, request['requests'][0]['arguments']['prompt'])
+        targets = read(self.root / RECORD)['stages'][0]['targets']
+        gaze = next(g for g in targets if g.get('aspect') == 'gaze')
+        self.assertEqual(override['value'], gaze['target'])
+        self.assertEqual(override['user_quote'], gaze['user_requirement'])
+        self.assertEqual('user', gaze['requirement_origin'])
 
     def test_extent_targets_and_user_ratio_are_not_lost(self):
         config = self.config()
@@ -392,7 +851,7 @@ class SheetFlowTest(unittest.TestCase):
         # File order is rear.png, reference.png.
         config = self.config()
         config['materials'] = [
-            {'source_id': s['source_id'], 'views': ['back' if Path(s['original_file']).name == 'rear.png' else 'front'],
+            {'source_id': s['source_id'], 'accessories': [], 'views': ['back' if Path(s['original_file']).name == 'rear.png' else 'front'],
              'observation': 'Synthetic actual angle label for routing tests.', 'quality': 'Synthetic readable angle.',
              'selection_reason': 'Synthetic complementary view.', 'decision': 'adopt',
              'uses': [{'id': 'identity_' + s['source_id'], 'kind': 'identity', 'stages': ['head'], 'target': 'Synthetic design.'}]}
@@ -428,6 +887,10 @@ class SheetFlowTest(unittest.TestCase):
         self.assertEqual(['s001'], goal['source_ids'])
         self.assertIn('source_upstream_front_silhouette', [e['id'] for e in packet['evidence']])
         self.assertIn('source_upstream_front_material', [e['id'] for e in packet['evidence']])
+        context = packet['generation_context']
+        self.assertEqual(args['prompt'], context['prompt'])
+        self.assertEqual(['front_material', 'back_silhouette', 'rear_design'], [r['guide'] for r in context['references']])
+        validate_generation_context(packet, self.root)
         self.assertEqual('self-check', response['next_action'])
 
     def test_front_original_can_supply_material_but_not_rear_design(self):
@@ -454,6 +917,7 @@ class SheetFlowTest(unittest.TestCase):
         self.assertFalse(any(e.get('stage') == 'front' for e in packet['evidence']))
         self.assertTrue({'source_upstream_front_material', 'source_upstream_front_silhouette'} <= {e['id'] for e in packet['evidence']})
 
+
     def test_rear_file_alias_cannot_claim_front_is_rear_design(self):
         self.rear_project()
         config = self.config('back')
@@ -477,7 +941,7 @@ class SheetFlowTest(unittest.TestCase):
         self.root = self.base / 'planned-material-production'
         api.start(self.root, self.sources)
         config = self.config()
-        config['materials'].append({'source_id': 's002', 'views': ['detail'],
+        config['materials'].append({'source_id': 's002', 'accessories': [], 'views': ['detail'],
             'observation': 'Synthetic stocking macro with connected circular motifs.',
             'quality': 'Synthetic readable spacing; finest weave unknown.', 'selection_reason': 'Synthetic unique material macro.',
             'decision': 'partial', 'uses': [{'id': 'stocking_surface', 'kind': 'material',
@@ -489,7 +953,9 @@ class SheetFlowTest(unittest.TestCase):
         for role in ('front', 'back', 'left'):
             ranked = self.receive(self.baseline(role), role)
             board = ranked['ranking_board']
-            api.rank(self.root, role, {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic preference.', 'board_sha256': board['sha256']})
+            next_action = api.rank(self.root, role, {'preferred_call': board['call_ids'][0], 'reason': 'Synthetic preference.', 'board_sha256': board['sha256']})
+            if role == 'front':
+                self.structure(next_action)
             stage = next(s for s in read(self.root / RECORD)['stages'] if s['stage'] == role)
             coverage = stage['reference_coverage']
             self.assertEqual(1, len(coverage))
@@ -497,11 +963,13 @@ class SheetFlowTest(unittest.TestCase):
             self.assertEqual([3, 4, 35, 26], coverage[0]['crop'])
             goal = next(g for g in stage['targets'] if g['id'] == 'design_planned_stocking_surface')
             key = coverage[0]['reference_key']
-            self.assertEqual([key], goal['source_ids'])
-            referenced = self.root / stage['target_sources'][key]['file']
-            self.assertEqual(digest(referenced), stage['recipe']['inputs'][coverage[0]['reference_index'] - 1]['sha256'])
+            self.assertEqual(read(self.root / FLOW)['stages'][role]['review_reference_map'][key], goal['source_ids'])
+            referenced = self.root / stage['target_sources'][goal['source_ids'][0]]['file']
+            with Image.open(self.sources / 'stockings.png') as original, Image.open(referenced) as native:
+                self.assertEqual(original.convert('RGBA').crop((3, 4, 35, 26)).tobytes(), native.convert('RGBA').tobytes())
+            generated_ref = self.root / stage['recipe']['inputs'][coverage[0]['reference_index'] - 1]['file']
             sidecar = next(read(p) for p in self.root.glob('制作记录/参考辅助/*.png.json')
-                           if read(p)['output_sha256'] == digest(referenced))
+                           if read(p)['output_sha256'] == digest(generated_ref))
             self.assertEqual([3, 4, 35, 26], sidecar['rows'][0]['panels'][0]['crop'])
             self.assertEqual([1, 1], sidecar['rows'][0]['panels'][0]['actual_scale_xy'])
 
@@ -574,6 +1042,10 @@ class SheetFlowTest(unittest.TestCase):
         self.assertTrue({'upstream_front_material', 'upstream_front_silhouette', 's001'} <= set(stage['target_sources']))
         packet = read(self.root / workflow.load_all(self.root)[2]['stages']['back']['attempts'][0]['packet_file'])
         self.assertTrue({'source_upstream_front_material', 'source_upstream_front_silhouette'} <= {e['id'] for e in packet['evidence']})
+        packed = next(r for r in packet['generation_context']['references'] if 'regions' in r)
+        self.assertEqual({'front_material', 'back_silhouette'}, {r['guide'] for r in packed['regions']})
+        self.assertEqual(stage['recipe']['inputs'][packed['index'] - 1]['regions'], packed['regions'])
+        validate_generation_context(packet, self.root)
 
     def test_declared_clear_replacement_removes_blurry_duplicate_before_packing(self):
         Image.new('RGB', (18, 24), (50, 70, 90)).save(self.sources / 'blur.png')

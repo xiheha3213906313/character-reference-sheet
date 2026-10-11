@@ -81,8 +81,8 @@ def stage_plan(plan, role):
 
 def refresh_prepared(root, role, previous, current, values):
     """Invalidate affected prepared targets; do not revive or manufacture visual reviews."""
-    affected = [stage for stage in previous['stages']
-                if stage_plan(previous['accessory_visibility'], stage) != stage_plan(current['accessory_visibility'], stage)]
+    from sheet_flow import plan_changed
+    affected = [stage for stage in previous['stages'] if plan_changed(previous, current, stage)]
     earlier = [stage for stage in affected if STAGES.index(stage) < STAGES.index(role)]
     require(not earlier, '饰品汇总改变了上游目标，先prepare --stage ' + (earlier[0] if earlier else role))
     brief = values[0]

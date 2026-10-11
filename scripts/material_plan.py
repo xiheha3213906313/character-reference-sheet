@@ -17,17 +17,17 @@ class PlanError(ValueError):
 
 
 def route_errors(materials):
-    rear = any(m['decision'] != 'exclude' and set(m['views']) & {'back', 'rear_oblique'} for m in materials)
     errors = []
     for i, material in enumerate(materials):
         front_only = 'front' in material['views'] and not set(material['views']) & {'back', 'rear_oblique'}
         for j, use in enumerate(material['uses']):
-            if rear and front_only and 'back' in use['stages'] and use['kind'] != 'material':
+            if material['decision'] != 'exclude' and front_only and 'back' in use['stages'] and use['kind'] != 'material':
                 errors.append({'field': f'materials[{i}].uses[{j}]', 'source_id': material['source_id'],
                     'use_id': use['id'], 'stage': 'back',
                     'message': material['source_id'] + '/' + use['id'] + '的正面设计/身份不能指定为背面设计依据',
                     'correction': '仅属材料纹理时改kind为material；含设计时只从本项stages移除back，'
-                                  '将背面可用的材料事实另列kind:material用途。不要连带删除front/left设计依据。'})
+                                  '将背面可用的材料事实另列kind:material用途。没有后方原图时在正面选优后的空间模板记录兼容推断，'
+                                  '不改head/front/left的target，不将推断绑定正面设计或剪影为证据。'})
     return errors
 
 

@@ -9,6 +9,21 @@ from review_v2 import (digest, maker_valid, read, reviewer_valid, stage_budget, 
                        validate_self_check)
 
 
+def preflight_result(report, errors):
+    """Report readiness is independent of its model-reported visual conclusions."""
+    return {'next_action': 'correct_report_fields' if errors else 'report_ready',
+            'report_validation': 'invalid' if errors else 'valid', 'field_errors': errors,
+            'visual_approval_recorded': False, 'visual_state_changed': False,
+            'reported_visual_results': {c['id']: c.get('result') for c in report.get('checks', [])
+                                        if isinstance(c, dict) and isinstance(c.get('id'), str)}
+                                       if isinstance(report.get('checks'), list) else {},
+            'instruction': ('一次修完全部列出的字段；未看的证据须实际查看后才能填写。'
+                            '报告无效不等于图片待核实：保留实际视觉结论，不将字段错误改成pending，'
+                            '不补证、不返工、不生图；修正本报告后重新预检。' if errors else
+                            '报告字段与引用就绪，pass/fail/pending仍为模型实际判断。'
+                            '一次向主模型返回最终报告路径和结论，主模型再review登记。')}
+
+
 def production_input_errors(report):
     """Freeze the ordinary review envelope; low-level special interfaces stay separate."""
     errors = []
@@ -20,7 +35,7 @@ def production_input_errors(report):
 
     known(report, {'kind', 'call_id', 'packet_sha256', 'reviewer', 'viewed_evidence_ids', 'checks',
                    'quality_observations', 'background_policy', 'supplement_round', 'extra_evidence',
-                   'reviewer_replacement_reason'}, 'report')
+                   'reviewer_replacement_reason', 'reading_confirmation'}, 'report')
     known(report.get('reviewer'), {'mode', 'model', 'agent_id', 'reason_code', 'reason'}, 'reviewer')
     known(report.get('quality_observations'), {'hair', 'face'}, 'quality_observations')
     known(report.get('background_policy'), {'mode', 'alpha_source', 'alpha_limitation', 'reason'}, 'background_policy')
@@ -28,7 +43,7 @@ def production_input_errors(report):
     if isinstance(checks, list):
         for index, item in enumerate(checks):
             known(item, {'id', 'result', 'reference_observation', 'candidate_observation', 'comparison_basis',
-                         'evidence_ids', 'empty_background_samples', 'issue_key'}, f'checks[{index}]')
+                         'evidence_ids', 'evidence_requirement', 'empty_background_samples', 'issue_key'}, f'checks[{index}]')
     return errors
 
 
@@ -62,7 +77,7 @@ def report_errors(root, role, report, values):
     def attempt(field, fn):
         try:
             fn()
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             errors.append({'field': field, 'message': str(exc)})
 
     choice = selection['stages'].get(role)
@@ -120,6 +135,9 @@ def report_errors(root, role, report, values):
         need(report.get('result') != 'fail' or bool(report.get('issue_key')), 'issue_key', '自评失败须有稳定问题id')
         need(not call.get('self_check'), 'call_id', '已有自评，不覆盖历史')
         return errors
+    if kind == 'visual':
+        from review_reading import confirmation_errors
+        errors.extend(confirmation_errors(root, role, call, report))
     artifacts = {a['id']: a for a in packet['evidence']}
     extra = report.get('extra_evidence', [])
     need(isinstance(extra, list), 'extra_evidence', '补证须为列表')
@@ -156,9 +174,10 @@ def report_errors(root, role, report, values):
         need(call is (choice.get('processing') or [None])[-1], 'call_id', '只复核当前处理版本')
         need(not call.get('pixel_equivalence'), 'kind', '无损处理只需processing-check，不重复完整复核')
     expected = packet.get('review_context', {}).get('agent_id')
-    from review_policy import validate_stage_reviewer, check_review_coverage
+    from review_policy import validate_stage_reviewer, review_coverage_errors, evidence_requirements
     attempt('reviewer.agent_id', lambda: validate_stage_reviewer(root, role, report))
-    attempt('evidence_coverage', lambda: check_review_coverage(packet, report))
+    errors.extend(review_coverage_errors(packet, report))
+    requirements = evidence_requirements(packet, extra)
     if expected and isinstance(report.get('reviewer'), dict) and report['reviewer'].get('mode') == 'subagent':
         need(report['reviewer'].get('agent_id') == expected or bool(report.get('reviewer_replacement_reason')), 'reviewer.agent_id', '返修交回原代理；替换须记录原因')
     round_number = report.get('supplement_round', 0)
@@ -186,8 +205,11 @@ def report_errors(root, role, report, values):
         ids = item.get('evidence_ids', [])
         valid_ids = isinstance(ids, list) and bool(ids) and all(isinstance(i, str) for i in ids) and set(ids) <= viewed
         need(valid_ids, field + '.evidence_ids', '须引用实际看过的证据')
-        if valid_ids:
-            need(any(artifacts[i].get('kind') in primary_kinds(group) for i in ids), field + '.evidence_ids', '缺少当前分组的主要证据')
+        if valid_ids and item.get('result') != 'pass':
+            if not any(artifacts[i].get('kind') in primary_kinds(group) for i in ids):
+                errors.append({'field': field + '.evidence_ids', 'check_id': item['id'],
+                               'message': '缺少当前分组的主要证据',
+                               'evidence_requirement': requirements[item['id']]})
         if group == 'background':
             policy = report.get('background_policy', packet['background_policy'])
             need(isinstance(policy, dict), 'background_policy', '须为对象')

@@ -505,6 +505,10 @@ class WorkflowTest(unittest.TestCase):
             self.register('too_many')
         change = {'issue_key': 'same_identity_issue', 'diagnosis': 'Fabricated repeated failure diagnosis.',
                   'change': 'Fabricated change to strategy.'}
+        before = copy.deepcopy(self.values[3])
+        with self.assertRaisesRegex(ValueError, '先落实'):
+            self.prepare(strategy_change=change)
+        self.assertEqual(before, self.values[3])
         self.prompt.write_text('Changed fixture prompt after repeated issue diagnosis.', encoding='utf-8')
         self.prepare(strategy_change=change)
         self.register('new_strategy')
@@ -516,8 +520,11 @@ class WorkflowTest(unittest.TestCase):
         self.limit_select('failed_0')
         self.assertTrue(self.gate()['downstream_ready'], self.gate()['errors'])
         self.assertFalse(self.gate()['recorded_approval_valid'])
-        with self.assertRaisesRegex(ValueError, '不再重置失败计数'):
-            self.prepare(strategy_change=change)
+        saved_strategy = copy.deepcopy(self.values[3]['strategy_changes'])
+        self.prepare(strategy_change=change)
+        self.assertEqual(saved_strategy, self.values[3]['strategy_changes'])
+        with self.assertRaisesRegex(ValueError, '另一项策略'):
+            self.prepare(strategy_change=dict(change, change='A different second strategy.'))
 
     def test_observation_requires_explicit_viewed_evidence_and_specific_content(self):
         self.prepare()

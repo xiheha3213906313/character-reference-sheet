@@ -15,7 +15,8 @@ from review_v2 import processing_binding
 from review_v2 import validate_review_integrity
 from review_v2 import ACCEPTANCE_STANDARD, maker_valid, stage_budget, validate_self_check, validate_calls
 from check_delivery import ROLES, within
-from review_policy import DEFAULT_GENERATION_LIMIT, REVIEWER_TASK, normalize_targets, primary_kinds, check_quality_observations, check_self_observations
+from review_policy import (DEFAULT_GENERATION_LIMIT, REVIEWER_TASK, normalize_targets, primary_kinds,
+                           check_quality_observations, check_self_observations, acceptance_instruction)
 from review_assets import comparison, pixel_equivalence, native_regions, background_candidates, mark_background_samples
 from review_v2 import dependency_binding, visual_binding, validate_inherited_visual
 from review_v2 import approved_at_limit
@@ -126,6 +127,7 @@ def prepare(root, role, config, values):
     target = target_binding(brief, role)
     deps = dependencies(root, state, role, brief)
     old = selection['stages'].get(role)
+    previous_recipe = (old or {}).get('recipe')
     generation_limit = config.get('generation_limit', (old or {}).get('generation_limit', DEFAULT_GENERATION_LIMIT))
     require(type(generation_limit) is int and generation_limit > 0, 'generation_limit须为正整数，默认6次')
     if old:
@@ -160,9 +162,15 @@ def prepare(root, role, config, values):
         key = f'{role}/{change["issue_key"]}'
         require(workflow['failures'].get(key, {}).get('count', 0) >= 3, '策略诊断应绑定已累计三次的同一问题')
         require(bool(change.get('diagnosis')) and bool(change.get('change')), '须明确诊断与具体策略变化')
-        require(key not in workflow['strategy_changes'], '新策略已尝试，不再重置失败计数')
-        workflow['strategy_changes'][key] = dict(change, event=next_event(workflow),
-                                                failures_before=workflow['failures'][key]['count'])
+        previous_change = workflow['strategy_changes'].get(key)
+        if previous_change:
+            require({k: v for k, v in previous_change.items() if k not in ('event', 'failures_before')} == change,
+                    '本问题已有另一项策略；沿用已登记strategy_change，只补齐prompt配置，不登记第二策略')
+        else:
+            require(previous_recipe is not None and recipe != previous_recipe,
+                    '策略须先落实到本阶段实际prompt/参考配方，再提交strategy_change；仅写诊断不消耗策略机会')
+            workflow['strategy_changes'][key] = dict(change, event=next_event(workflow),
+                                                    failures_before=workflow['failures'][key]['count'])
     brief.setdefault('skill_revision', fingerprint({name: digest(Path(__file__).with_name(name)) for name in
                                                    ('review_gate.py', 'review_v2.py', 'review_policy.py', 'review_workflow.py')}))
 
@@ -172,13 +180,12 @@ def retry_context(role, choice, workflow):
     for previous in reversed(stages):
         for attempt in reversed(previous.get('attempts', [])):
             review = previous.get('reviews', {}).get(attempt['id'], {})
-            if review.get('decision') == 'rejected':
+            if review.get('decision') in ('approved', 'rejected', 'unreviewed') and review.get('checks'):
                 return {'mode': 'followup', 'agent_id': review.get('reviewer', {}).get('agent_id'),
                         'issues': [{key: item.get(key) for key in ('id', 'issue_key', 'reference_observation', 'candidate_observation')}
                                    for item in review['checks'] if item['result'] == 'fail'],
                         'instruction': '交回本阶段原复核子代理。先复查上次问题，并看新图整体、头发、面部和明显新增错误；'
-                                       '不重复展开全部旧证据。饰品错位、长度等就当这样设计，关系合理即通过；'
-                                       '不要求精确还原；承载物错误、复制到另一面或与清楚原图的可见性矛盾仍拒绝，明显画质错误仍拒绝。'}
+                                       '不重复展开全部旧证据。' + acceptance_instruction(subsequent=True)}
     return {'mode': 'initial'}
 
 
@@ -317,16 +324,18 @@ def evidence_packet(root, role, call, brief, deps, policy, extra_evidence=None, 
             'acceptance_standard': ACCEPTANCE_STANDARD, 'review_context': review_context or {'mode': 'initial'},
             'packet_role': 'candidate_evidence', 'reviewer_role': 'visual_reviewer', 'background_policy': background_policy,
             'dispatch_prerequisite': 'valid_maker_self_check',
-            'maker_instructions': '制作模型只看参考—候选拼图，简单检查取景、身份造型、头发面部、服装位置及全身静态站姿的明显错误；'
+            'maker_instructions': acceptance_instruction(review_context) +
+                                  '制作模型只看参考—候选拼图，简单检查取景、身份造型、头发面部、服装位置及全身静态站姿的明显错误；'
                                   '默认可见眼睛应自然睁开，原图闭眼不必复制；未知瞳孔按当前风格补全，刘海自然遮眼允许。用户明确另定时遵从。'
                                   '正面双脚明显一前一后属于动作错误；长裙按原图盖脚属于正常遮挡，不为露鞋改裙摆。'
                                   '全身明显抱手、交握、抬臂也属于姿态错误，双臂应在身体两侧自然下垂，不能因参考或上游如此生成而接受。'
-                                  '还简查显眼挂饰的承载物与可见面，原图明确无饰的区域不能凭同套一致新增饰品。'
+                                  '还简查显眼挂饰的承载物与可见面，按本轮饰品尺度判断，不自行加严。'
                                   '用一两句实际观察填写self-check-template，不展开全流程自评。自评失败自行修复；'
                                   'receive已一次生成全部必要复核图片；制作端仍只看这些对照拼图。'
                                   '自评通过且接口返回reviewer_dispatch_ready:true后，才启动或联系本阶段复核代理，不额外运行status。',
             'background_sample_candidates': samples, 'self_check_fields': ['observation', 'viewed_evidence_ids'],
-            'reviewer_instructions': '先读取generation_context中的本次实际提示词与按真实顺序记录的参考用途/分区，按evaluation_scope核对当前视角可见内容。'
+            'reviewer_instructions': acceptance_instruction(review_context) +
+                                     '先读取generation_context中的本次实际提示词与按真实顺序记录的参考用途/分区，按evaluation_scope核对当前视角可见内容。'
                                      'comparison.reference_scopes限定每张原图核对哪些检查项；context_only目标只用已记事实检查候选是否误添，不打开其画外/异视角来源。'
                                      '默认自然睁眼，原图闭眼不锁身份；未知瞳孔可按当前风格合理补全，不以无法证明原始瞳色拒绝。用户明确另定时遵从。'
                                      '提示词是生成意图，不是视觉结论；不得把留白或强制露鞋等自拟目标加严成验收门槛。'
@@ -358,21 +367,28 @@ def store_packet(root, role, call, packet):
 
 
 def store_visual_template(root, call, packet):
+    from review_policy import evidence_requirements
     path = within(root, call['packet_file'])
     policy = packet['reviewer_policy']
     reviewer = ({'mode': 'self', 'model': policy.get('model') or 'inherited', 'reason_code': 'user_disabled',
                  'reason': policy.get('user_override_reason', '')} if policy['mode'] == 'self' else
                 {'mode': 'subagent', 'model': policy.get('model') or 'inherited',
                  'agent_id': packet.get('review_context', {}).get('agent_id') or ''})
+    requirements = evidence_requirements(packet)
     template = {'kind': 'visual', 'call_id': call['id'], 'packet_sha256': call['packet_sha256'],
                 'reviewer': reviewer, 'viewed_evidence_ids': [],
                 'checks': [{'id': goal['id'], 'result': 'pending', 'reference_observation': '',
                             'candidate_observation': '', 'comparison_basis': '', 'evidence_ids': [],
+                            'evidence_requirement': requirements[goal['id']],
                             **({'empty_background_samples': packet['background_sample_candidates']} if goal['group'] == 'background' else {})}
                            for goal in packet['checks']]}
     template['background_policy'] = packet['background_policy']
     template['quality_observations'] = {'hair': '', 'face': ''}
     write(path.with_name(path.stem + '-report-template.json'), template)
+    from production_records import FLOW
+    if (root / FLOW).is_file():
+        from review_reading import build
+        build(root, path, path.with_name(path.stem + '-report-template.json'))
 
 
 def review_dispatch(root, call, processing=False):
@@ -393,7 +409,7 @@ def review_dispatch(root, call, processing=False):
     output = template.with_name(template.stem.removesuffix('-report-template') + '-reviewer-output.json')
     policy = packet['reviewer_policy']
     dispatch = 'full_self_review' if policy['mode'] == 'self' else 'reuse_stage_agent' if known else 'spawn_new_stage_agent'
-    return {'reviewer_dispatch_ready': True, 'review_context': packet.get('review_context'),
+    result = {'reviewer_dispatch_ready': True, 'review_context': packet.get('review_context'),
             'reviewer_handoff': {'packet_file': call['packet_file'], 'packet_sha256': call['packet_sha256'],
                                  'stage': packet['stage'], 'dispatch_mode': dispatch,
                                  'agent_id': known if dispatch == 'reuse_stage_agent' else None,
@@ -401,13 +417,25 @@ def review_dispatch(root, call, processing=False):
                                  'report_template_file': local(root, template), 'report_output_file': str(output),
                                  'check_report_command': submit_command('check-report', root, packet['stage'], output),
                                  'root': str(root.resolve()),
-                                 'task': REVIEWER_TASK + '只读取本次packet_file和report_template_file一次；'
+                                 'task': acceptance_instruction(packet.get('review_context')) + REVIEWER_TASK + '已看清的内容不重复阅读；截断或缺失时补读缺失部分，不因此停止或换代理。'
                                          'dispatch_mode为full_self_review时由制作模型完整自评，不启动代理。否则本阶段首次必须新建复核代理，使用fork_turns:none；不得复用其他阶段代理或共享其他阶段的观察/结论。'
                                          '本阶段返修、补证和所选新增候选复用本阶段agent_id；其他阶段各自新建。'
                                          '提示词全文在generation_context.prompt，参考用途在references，路径以交接字段为准。'
                                          '不猜其他字段、查目录、重读提示词文件或读取聊天；有缺失按实际字段报告故障。'
                                          '实际完成全部适用查看后写report_output_file，执行check_report_command只读预检。'
                                          '若缺字段或漏看，只在本次交接内补足真实查看再预检；report_ready后一次返回最终报告。'}}
+    from production_records import FLOW
+    if (root / FLOW).is_file():
+        from review_reading import handoff
+        h = result['reviewer_handoff']
+        h.update(handoff(root, packet_path, template))
+        h['task'] = (acceptance_instruction(packet.get('review_context')) +
+                     '独立复核本阶段，首次新建用fork_turns:none，返修/补证复用本阶段代理，不共享其他阶段结论。'
+                     '按交接read_review_command读完整分页资料；全部读完才看图和填写模板，不能截断提示词或检查目标。'
+                     '读取异常在本代理内恢复；仅代理实际不可用才记录原因替换。'
+                     '模板是填写数据，按准确路径编辑，不全文打印、不搜目录。'
+                     '只填本人实际观察和agent_id；预检report_ready后一次返回报告路径、本人id及结论。')
+    return result
 
 
 def register(root, role, config, values):
@@ -747,6 +775,9 @@ def record_review(root, role, config, values):
     packet_file = call.get('packet_file')
     require(packet_file is not None, '先完成比较选择再核验新增优胜候选')
     packet = read(within(root, packet_file))
+    from review_reading import confirmation_errors
+    reading_errors = confirmation_errors(root, role, call, config)
+    require(not reading_errors, '；'.join(e['message'] for e in reading_errors))
     from review_policy import check_review_coverage
     check_review_coverage(packet, config)
     expected_agent = packet.get('review_context', {}).get('agent_id')

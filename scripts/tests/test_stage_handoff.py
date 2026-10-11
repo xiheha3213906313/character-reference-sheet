@@ -126,6 +126,35 @@ class HandoffTest(unittest.TestCase):
         handoff = self.simple(simple)['reviewer_handoff']
         self.assertEqual('reuse_stage_agent', handoff['dispatch_mode'])
         self.assertEqual('synthetic-reviewer', handoff['agent_id'])
+        from review_policy import FOLLOWUP_ACCESSORIES
+        self.assertIn(FOLLOWUP_ACCESSORIES, handoff['task'])
+
+    def test_crop_and_followup_scale_reaches_maker_pages_and_agent_without_filling_pass(self):
+        from review_policy import CROP_ACCEPTANCE, FOLLOWUP_ACCESSORIES
+        config = self.config()
+        first = self.receive(api.prepare(self.root, 'head', config))
+        packet = self.packet(first)
+        self.assertIn(CROP_ACCEPTANCE, packet['maker_instructions'])
+        action = self.simple(first)
+        self.assertIn(CROP_ACCEPTANCE, action['reviewer_handoff']['task'])
+        api.review(self.root, 'head', self.report(action, result='fail'))
+        # A new recipe must not reset the stage's second-review scale.
+        config['prompt']['identity'] += ' Synthetic repair recipe.'
+        repair = self.receive(api.prepare(self.root, 'head', config))
+        packet = self.packet(repair)
+        self.assertEqual('followup', packet['review_context']['mode'])
+        for key in ('maker_instructions', 'reviewer_instructions'):
+            self.assertIn(CROP_ACCEPTANCE, packet[key])
+            self.assertIn(FOLLOWUP_ACCESSORIES, packet[key])
+        self.assertNotIn('承载物错误、复制到另一面', packet['review_context']['instruction'])
+        handoff = self.simple(repair)['reviewer_handoff']
+        self.assertIn(FOLLOWUP_ACCESSORIES, handoff['task'])
+        template = read(self.root / handoff['report_template_file'])
+        self.assertTrue(all(c['result'] == 'pending' for c in template['checks']))
+        from review_reading import semantic_document
+        document = semantic_document(packet, template)
+        self.assertIn(FOLLOWUP_ACCESSORIES, document['reviewer_instructions'])
+        self.assertIn(CROP_ACCEPTANCE, document['acceptance_standard'])
 
     def test_forbidden_or_specified_agent_mode_is_explicit_in_handoff(self):
         config = self.config()
@@ -300,9 +329,15 @@ class HandoffTest(unittest.TestCase):
         api.review(self.root, 'head', report)
         action = supplement(self.root, 'head', {'reason': 'Synthetic unclear spatial detail.',
             'comparisons': [{'id': 'spatial', 'reference_ids': ['source_s001'], 'check_ids': ['design_shoulder']}]})
+        from review_policy import CROP_ACCEPTANCE, FOLLOWUP_ACCESSORIES
+        self.assertIn(CROP_ACCEPTANCE, action['reviewer_handoff']['task'])
+        self.assertIn(FOLLOWUP_ACCESSORIES, action['reviewer_handoff']['task'])
         template = read(self.root / action['reviewer_handoff']['report_template_file'])
         report = self.report(handoff)
         report.update(supplement_round=1, extra_evidence=template['extra_evidence'])
+        report['reading_confirmation'] = template['reading_confirmation']
+        manifest = read(Path(action['reviewer_handoff']['reading_manifest_file']))
+        report['reading_confirmation']['completed_page_ids'] = [p['id'] for p in manifest['pages']]
         board = template['extra_evidence'][0]
         self.assertEqual(['s001'], board['source_ids'])
         goal = next(c for c in report['checks'] if c['id']=='design_shoulder')

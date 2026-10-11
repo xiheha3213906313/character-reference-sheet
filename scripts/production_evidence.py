@@ -125,11 +125,17 @@ def supplement(root, role, config):
     template_path = packet_path.with_name(packet_path.stem + '-report-template.json')
     template = read(template_path)
     template.update(supplement_round=1, extra_evidence=generated)
+    from review_policy import evidence_requirements
+    requirements = evidence_requirements(packet, generated)
+    for item in template['checks']:
+        item['evidence_requirement'] = requirements[item['id']]
     previous = values[2]['stages'][role]['reviews'][packet['call_id']]
     template['reviewer'] = copy.deepcopy(previous['reviewer'])
     # Fresh pending fields; a cache/rendering operation cannot inherit visual passes or viewed flags.
     template_file = directory / 'report-template.json'
     workflow.write(template_file, template)
+    from review_reading import build
+    build(root, packet_path, template_file)
     saved = {'schema_version': 2, 'call_id': packet['call_id'], 'packet_sha256': status['packet_sha256'],
              'config': copy.deepcopy(config), 'evidence': generated, 'reviewer': previous['reviewer'],
              'report_template_file': workflow.local(root, template_file)}
@@ -156,8 +162,16 @@ def handoff(root, status, saved, ref):
     from sheet_flow import submit_command
     result['reviewer_handoff']['check_report_command'] = submit_command(
         'check-report', root, status['stage'], Path(result['reviewer_handoff']['report_output_file']))
-    result['reviewer_handoff']['task'] += (
+    result['reviewer_handoff']['task'] = (
+        workflow.acceptance_instruction(subsequent=True) +
+        '本阶段补证交回原复核代理；按当前read_review_command读取完整资料，截断只重读缺页。'
         '只补看supplement_file中的必要证据，交回原复核代理，不重新生成。'
         '重新确认完整当前观察集合，不由脚本继承pass；仍不确定保留pending。'
-        '直接写report_output_file，主模型review该文件。')
+        '按本次report_template_file编辑，不能搜索或沿用旧路径；直接写report_output_file。'
+        '写完执行check_report_command，report_ready才返回报告路径、本人实际agent_id及结论。'
+        '本次模板=' + str(root / saved['report_template_file']) + '；输出=' +
+        result['reviewer_handoff']['report_output_file'] + '；预检=' +
+        result['reviewer_handoff']['check_report_command'] + '。')
+    from review_reading import handoff as reading_handoff
+    result['reviewer_handoff'].update(reading_handoff(root, root / status['packet_file'], root / saved['report_template_file']))
     return result

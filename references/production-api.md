@@ -4,14 +4,15 @@
 
 Windows入口：`& "<技能目录>/scripts/sheet_flow.ps1" <命令> --root "<工作目录>" ...`。其他系统用可用Python运行 `scripts/sheet_flow.py`，其参数相同。入口自动选择已提供的运行时，不反复试失效的默认python。所有JSON文件为UTF-8；相对图片和config路径均按root解析，绝对路径原样使用；接口返回的配置及提交命令使用绝对路径，不依赖当前目录。阶段输入的真实坐标按各自原图像素填写。
 
-每次调用都返回`next_action`及下一步所需参数/文件，直接执行下一步，不另跑status、重新列目录或重读提示词。仅恢复被中断的任务时用status，它只读、不新增调用。没有版本变化或具体未解决疑点时，不重复打开已清楚的同一文档或图片；独立复核者须首次亲自看必要证据。模型实际调用图像工具，脚本不调用模型、不判断视觉。生成返回tool_call_count及requests，本批每项只调用一次；首轮一项只生一张，返回后receive，不额外测试或探测生图。普通制作不调用聊天列表或聊天读取接口，当前聊天也不回读；用户明确要求引用另一个聊天时只读取指定对象。恢复用status及requests_file，不从聊天找参数、编号或进度。上述访问规则约束执行行为，不是操作系统层面的读文件权限封锁。
+每次调用都返回`next_action`及下一步所需参数/文件，直接执行下一步，不另跑status、重新列目录或重读提示词。仅恢复被中断的任务时用status，它只读、不新增调用。没有版本变化或具体未解决疑点时，不重复打开已清楚的同一文档或图片；独立复核者须首次亲自看必要证据。模型实际调用图像工具，脚本不调用模型、不判断视觉。生成返回tool_call_count及requests，本批每项只调用一次；image_gen直接执行返回execution_code，先保存回执再显示，其他工具按capture接口保存；首轮一项只生一张，返回后receive，不额外测试或探测生图。普通制作不调用聊天列表或聊天读取接口，当前聊天也不回读；用户明确要求引用另一个聊天时只读取指定对象。恢复用status及requests_file，不从聊天找参数、编号或进度。上述访问规则约束执行行为，不是操作系统层面的读文件权限封锁。
 
 | 当前动作 | 命令 | 模型只提供 | 脚本自动完成 |
 |---|---|---|---|
 | 开始 | `start --sources "<素材目录>"` | 素材目录 | 清点当前目录图片，编号、尺寸、哈希、快照、首次准备表 |
 | 准备当前阶段 | `prepare --stage head --config "<输入.json>"` | 一次角色/素材分析及本阶段语义 | 固定模板编译、实际输入容量检查、验收目标、配方、请求参数 |
 | 更新已保存选材 | `update-plan --stage back --config "<原选材输入.json>"` | 修正后的materials/accessory_visibility及可选character | 一次校验并保存，失效相关批准，返回最早阶段；不发生成请求 |
-| 工具返回 | `receive --stage head --config "<结果.json>"` | 本批request_id、原始回执、可取得的真实tool_call_id（不可得填null） | 一次归档、调用次数、证据、拼图、记录 |
+| 缓存工具返回 | `capture --stage head --config "<结果.json>"` | 整批真实原始回执 | 持久保存回执；不解析路径、不登记调用次数或候选 |
+| 登记工具返回 | `receive --stage head --config "<结果.json>"` | 本批request_id、原始回执、可取得的真实tool_call_id（不可得填null） | 一次归档、调用次数、证据、拼图、记录 |
 | 制作端简评 | `self-check --stage head --config "<简评.json>"` | 拼图id、简短实际观察、pass/fail | 绑定候选与版本；通过才开放代理交接 |
 | 代理返回前预检 | `check-report --stage head --config "<代理报告.json>"` | 同一份实际报告 | 只读检查字段、适用证据和查看引用；不保存批准 |
 | 子代理报告 | `review --stage head --config "<代理直接写的报告.json>"` | 代理实际观察/结论 | 字段预检、像素采样、固定记录、下一步；不重抄报告 |
@@ -20,6 +21,8 @@ Windows入口：`& "<技能目录>/scripts/sheet_flow.ps1" <命令> --root "<工
 | 正面最终选定 | `record-structure --stage front --config "<返回的空间分析.json>"` | 所选正面的附着、走向、遮挡与背/侧可见范围 | 固定清单、来源绑定、编译背/侧目标；不生图、不做合格评价 |
 | 四阶段完成 | `deliver`，实际看图后再`deliver --config "<交付简查.json>"` | 两项简查观察 | 四PNG、全部候选数据、现成网页、总览、角色描述、清单、复制与最终核对 |
 | 恢复 | `status --stage head` | 当前阶段 | 返回已经准备好的下一步；不生成、不重验、不写记录 |
+| 恢复执行包 | `restore-execution --stage head` | 按返回命令执行 | 只补缺失的固定加载包，保留原请求与累计次数；不调用生图 |
+| 分页复核资料 | `read-review --manifest "<交接给定路径>" --page 1` | 给定入口及页码 | 只读完整资料页与下一页命令；提示词、用途及目标不截短 |
 
 阶段键固定`head/front/back/left`，依赖顺序固定特写→正面→背面→左侧面。接口内部完成网页的left→side映射。
 
@@ -28,6 +31,8 @@ Windows入口：`& "<技能目录>/scripts/sheet_flow.ps1" <命令> --root "<工
 ## prepare
 
 首次提交就检查全部计划阶段的用途冲突，一次返回所有可检测路由问题。field_errors逐项给field/source_id/use_id/stage及correction；不等背面阶段再逐条失败。正面设计不能作背面设计答案，材料部分拆成material用途；仅移除错误的back路由，保留有效front/left路由，不为了过检查丢失侧面鞋型等设计依据。
+
+没有后方原图时同样在首次prepare检查上述路由；兼容背面推断只在正面选优后的空间模板记录，不改写身份或上游验收目标。update-plan按每个阶段实际采用的用途计算失效，仅移除back不会撤销head/front；修改上游实际目标仍使它及其下游失效。空间记录需要重填时直接返回analyze_front_structure入口。
 
 开始只读选材规范，实际查看每张原图和确有必要的细节。观察与采用决定一次写入start生成的`制作记录/阶段输入/首次准备.json`。先分析内容，再决定采用；同一文件即可，不另写Markdown。脚本会自动生成图片选用文档和角色描述。
 
@@ -125,7 +130,7 @@ visibility固定visible/not_visible/unclear：部分可见用visible，同时分
 
 `update-plan --stage back --config "<原选材输入.json>"`中的stage是准备恢复的阶段。脚本校验成功才保存；失败不修改已保存计划、批准或调用次数。存在尚未receive的请求时先登记该批结果，不能在工具执行期间改变目标。
 
-返回plan_saved、affected_prepared_stages（依特写→正面→背面→左侧面排序）及prepare_config_files。已准备阶段受影响时，返回最早阶段的config_file和submit_command；直接执行，不重新拼写阶段输入。无已准备阶段受影响时，原样重试刚才的阶段prepare。更新本身不发生成请求，既有调用次数及失败累计保留；相关批准立即失效，重新prepare和实际验收前不能进入下游。只改观察措辞、排除说明等未改变生成事实的记录，不失效图片批准。
+返回plan_saved、affected_prepared_stages（依特写→正面→背面→左侧面排序）及prepare_config_files。已准备阶段受影响时，返回最早阶段的config_file和submit_command；直接执行，不重新拼写阶段输入。无已准备阶段受影响时，尚未准备的视图继续prepare；当前视图已完成则直接返回后续动作，不重开生成。已完成视图以同一阶段输入重复prepare也直接推进，不把新增隐藏饰件重编译成新一轮生图。更新本身不发生成请求，既有调用次数及失败累计保留；相关批准立即失效，重新prepare和实际验收前不能进入下游。只改观察措辞、排除说明、character.outfit/outfit_name/setting_basis等描述字段或可见性reason，不失效图片批准。新增饰件在已完成视图为out_of_frame/not_visible，只补清单，不撤销该视图的批准、选优或追加记录；在visible/unclear视图才属于目标变更。已有饰件的位置、可见性或实际身份目标变更仍使相关阶段及已准备下游失效。取消后方补录导致整套从头重做的流程。
 
 在prepare仍使用旧计划时，错误返回plan_config_file和plan_submit_command，明确先更新哪个文件。不要反复改back-prepare、重新跑head或修改生产接口.json；这些都不能代替显式更新共享计划。
 
@@ -133,7 +138,12 @@ visibility固定visible/not_visible/unclear：部分可见用visible，同时分
 
 | next_action | 直接使用 | 填写范围 | 提交后 |
 |---|---|---|---|
-| generate / generate_parallel | requests、requests_file、receipt_config_file、submit_command | 原样调用arguments；每项当前回执填result/error，编号可得才填 | 整批receive |
+| generate / generate_parallel | execution_code；其他工具用requests及capture_submit_command | image_gen原样执行固定代码；其他工具原样调用arguments并保存真实返回 | 整批capture后receive |
+| receive | receipt_config_file、submit_command | 直接登记缓存；有多个实际输出时合法选择output | 简评或排序 |
+| recover_receipts | execution_marker_file | 等待在途工具或恢复当前store中的实际回执，不能重发 | 回执齐后capture/receive |
+| correct_receipt_fields | errors、receipt_validation | 保留真实result/error，只修登记字段，不重生图 | 重试receive |
+| correct_report_fields | report_validation、field_errors、reported_visual_results | 一次修完字段，保留实际视觉结论；不补证或生图 | 重新check-report |
+| revise_input_or_repair / stop_and_diagnose | repair_basis中的参考事实、候选表现、比较依据及证据 | 先核对修正方向，再填写当前阶段必要修复；错误目标只更正计划 | 只处理相关图 |
 | self-check | comparisons、config_file、submit_command | result、observation、viewed_evidence_ids；fail另填issue_key | 通过才返回代理交接 |
 | review_first / review_selected / review_processed | reviewer_handoff | 按dispatch_mode调度本阶段代理 | 代理完成查看、写报告、check-report后一次返回 |
 | rank | ranking_board、config_file、submit_command | preferred_call、reason | 首张复用批准；新增胜出才复核 |

@@ -79,6 +79,9 @@ class SheetFlowTest(unittest.TestCase):
         handoff = response['reviewer_handoff']
         packet = read(self.root / handoff['packet_file'])
         report = read(self.root / handoff['report_template_file'])
+        if 'reading_confirmation' in report:
+            manifest = read(Path(handoff['reading_manifest_file']))
+            report['reading_confirmation']['completed_page_ids'] = [p['id'] for p in manifest['pages']]
         report['reviewer'] = {'mode': mode, 'model': 'inherited', 'agent_id': 'synthetic-reviewer' if role == 'head' else 'synthetic-reviewer-' + role}
         if mode == 'self':
             report['reviewer'].update(reason_code='user_disabled', reason='Synthetic user prohibition.')
@@ -277,7 +280,8 @@ class SheetFlowTest(unittest.TestCase):
         self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
         handoff = self.simple(simple)
         self.assertIn(str(self.root / handoff['reviewer_handoff']['packet_file']), handoff['reviewer_handoff']['task'])
-        self.assertIn('generation_context.prompt', handoff['reviewer_handoff']['task'])
+        self.assertTrue(Path(handoff['reviewer_handoff']['reading_manifest_file']).is_file())
+        self.assertIn(handoff['reviewer_handoff']['reading_manifest_file'], handoff['reviewer_handoff']['read_review_command'])
         rank = self.receive(api.review(self.root, 'head', self.report(handoff)))
         config = read(Path(rank['config_file']))
         self.assertEqual('', config['preferred_call'])
@@ -395,6 +399,116 @@ class SheetFlowTest(unittest.TestCase):
             api.update_plan(self.root, 'front', config)
         self.assertEqual(before, {p: digest(p) for p in self.root.rglob('*') if p.is_file()})
 
+    def add_rear_bow(self, config):
+        material = config['materials'][0]
+        accessory = {'id': 'hood_bow', 'name': 'Synthetic rear hood bow', 'carrier': 'Synthetic hood back',
+                     'location': 'Synthetic rear center'}
+        material['accessories'].append({**accessory, 'visibility': 'visible', 'observation': 'Synthetic rear-only bow.'})
+        material['uses'].append({'id': 'hood_bow_back', 'kind': 'design', 'stages': ['back'],
+                                 'target': 'Synthetic rear hood bow below existing pom decorations.'})
+        config['accessory_visibility'].append({**accessory, 'stages': {
+            r: {'visibility': v, 'source_ids': ['s001'], 'reason': 'Synthetic view-specific observation.'}
+            for r, v in [('head', 'out_of_frame'), ('front', 'not_visible'), ('back', 'visible'), ('left', 'unclear')]}})
+
+    def test_rear_only_inventory_addition_preserves_completed_head_front_and_their_groups(self):
+        config = self.config()
+        self.finish_stage('head')
+        self.finish_stage('front')
+        before_flow = read(self.root / FLOW)
+        before_values = workflow.load_all(self.root)
+        self.add_rear_bow(config)
+        result = api.update_plan(self.root, 'back', config)
+        self.assertEqual([], result['affected_prepared_stages'])
+        self.assertEqual('analyze_front_structure', result['next_action'])
+        self.assertEqual(before_flow['requests'], read(self.root / FLOW)['requests'])
+        after = workflow.load_all(self.root)
+        for role in ('head', 'front'):
+            self.assertEqual(before_values[1]['stages'][role], after[1]['stages'][role])
+            self.assertEqual(before_values[2]['stages'][role], after[2]['stages'][role])
+            self.assertEqual('continue', workflow.status(self.root, role, after)['next_action'])
+        repeated = api.prepare(self.root, 'head', config)
+        self.assertEqual('prepare_next_stage', repeated['next_action'])
+        self.assertEqual(before_flow['requests'], read(self.root / FLOW)['requests'])
+        self.assertEqual(before_values[2]['stages']['head'], workflow.load_all(self.root)[2]['stages']['head'])
+        self.structure(result)
+        request = api.prepare(self.root, 'back', self.config('back'))
+        self.assertEqual('generate', request['next_action'])
+        self.assertEqual('back', request['requests'][0]['stage'])
+        self.assertIn('hood_bow_back', request['requests'][0]['arguments']['prompt'])
+        self.assertEqual(6, len(before_flow['requests']))
+        self.assertEqual(7, len(read(self.root / FLOW)['requests']))
+
+    def test_rear_only_addition_invalidates_prepared_rear_without_rewinding_front(self):
+        config = self.config()
+        self.finish_stage('head')
+        self.finish_stage('front')
+        self.finish_stage('back')
+        before = workflow.load_all(self.root)
+        requests = copy.deepcopy(read(self.root / FLOW)['requests'])
+        self.add_rear_bow(config)
+        result = api.update_plan(self.root, 'back', config)
+        self.assertEqual(['back'], result['affected_prepared_stages'])
+        self.assertEqual('analyze_front_structure', result['next_action'])
+        after = workflow.load_all(self.root)
+        for role in ('head', 'front'):
+            self.assertEqual(before[1]['stages'][role], after[1]['stages'][role])
+            self.assertEqual(before[2]['stages'][role], after[2]['stages'][role])
+        self.assertTrue(after[1]['stages']['back']['plan_requires_prepare'])
+        self.assertEqual(requests, read(self.root / FLOW)['requests'])
+
+    def test_hidden_catalog_addition_is_neutral_but_actual_visibility_correction_is_not(self):
+        before = self.config()
+        after = copy.deepcopy(before)
+        self.add_rear_bow(after)
+        flows = [{k: c[k] for k in ('character', 'materials', 'accessory_visibility')} for c in (before, after)]
+        self.assertFalse(api.plan_changed(*flows, 'head'))
+        self.assertFalse(api.plan_changed(*flows, 'front'))
+        self.assertTrue(api.plan_changed(*flows, 'back'))
+        self.assertTrue(api.plan_changed(*flows, 'left'))
+        wording = copy.deepcopy(flows[1])
+        wording['accessory_visibility'][0]['stages']['head']['reason'] += ' Synthetic clarified explanation.'
+        self.assertFalse(api.plan_changed(flows[1], wording, 'head'))
+        changed = copy.deepcopy(flows[1])
+        changed['accessory_visibility'][0]['stages']['front']['visibility'] = 'visible'
+        self.assertTrue(api.plan_changed(flows[1], changed, 'front'))
+        changed = copy.deepcopy(flows[1])
+        changed['accessory_visibility'][0]['stages']['front']['location'] = 'Synthetic different forbidden face'
+        self.assertTrue(api.plan_changed(flows[1], changed, 'front'))
+
+    def test_description_and_reason_edits_do_not_invalidate_images_but_actual_identity_does(self):
+        config = self.config()
+        self.finish_stage('head')
+        self.finish_stage('front')
+        before = workflow.load_all(self.root)
+        config['character']['outfit'] += ' Synthetic additional rear description.'
+        config['character']['setting_basis'] += ' Synthetic wording correction.'
+        requests = copy.deepcopy(read(self.root / FLOW)['requests'])
+        result = api.update_plan(self.root, 'front', config)
+        self.assertEqual([], result['affected_prepared_stages'])
+        self.assertEqual('prepare_next_stage', result['next_action'])
+        self.assertEqual(requests, read(self.root / FLOW)['requests'])
+        after = workflow.load_all(self.root)
+        self.assertEqual(before[1], after[1])
+        config['character']['appearance'] += ' Synthetic changed identity.'
+        result = api.update_plan(self.root, 'back', config)
+        self.assertEqual(['head', 'front'], result['affected_prepared_stages'])
+
+    def test_failed_review_returns_actual_direction_before_repair_without_reserving_call(self):
+        simple = self.receive(api.prepare(self.root, 'head', self.config()))
+        handoff = self.simple(simple)
+        report = self.report(handoff)
+        item = next(c for c in report['checks'] if c['id'] == 'design_shoulder')
+        item.update(result='fail', issue_key='wearing_direction',
+                    reference_observation='Synthetic coat falls below shoulder, leaving shoulder exposed.',
+                    candidate_observation='Synthetic coat raised above shoulder.',
+                    comparison_basis='Synthetic wearing relation inverted.')
+        requests = copy.deepcopy(read(self.root / FLOW)['requests'])
+        result = api.review(self.root, 'head', report)
+        self.assertEqual('revise_input_or_repair', result['next_action'])
+        self.assertEqual([item['reference_observation']], [c['reference_observation'] for c in result['repair_basis']])
+        self.assertEqual(item['candidate_observation'], result['repair_basis'][0]['candidate_observation'])
+        self.assertEqual(requests, read(self.root / FLOW)['requests'])
+
     def test_review_expands_generation_packs_and_shows_each_reference_once(self):
         for index, color in enumerate([(70, 50, 90), (110, 70, 80), (140, 110, 95)], 1):
             Image.new('RGB', (25 + index, 40), color).save(self.sources / ('detail-' + str(index) + '.png'))
@@ -496,7 +610,7 @@ class SheetFlowTest(unittest.TestCase):
         self.assertFalse(check(workflow.load_all(self.root)[1], self.root, stage='back')['recorded_approval_valid'])
         invalid = copy.deepcopy(back_config)
         invalid['accessory_visibility'] = copy.deepcopy(changed['accessory_visibility'])
-        invalid['accessory_visibility'][0]['stages']['head']['reason'] = 'Synthetic upstream change.'
+        invalid['accessory_visibility'][0]['stages']['head']['location'] = 'Synthetic changed upstream location.'
         before = (self.root / FLOW).read_bytes()
         with self.assertRaisesRegex(ValueError, '上游目标'):
             api.prepare(self.root, 'back', invalid)
@@ -765,8 +879,7 @@ class SheetFlowTest(unittest.TestCase):
         self.assertEqual('review_supplement', api.advance(self.root, 'head', mutate=False)['next_action'])
         with self.assertRaisesRegex(ValueError, '一次补证'):
             supplement(self.root, 'head', dict(config, reason='Synthetic second batch.'))
-        report = self.report(handoff, result='pending')
-        report.update(supplement_round=1, extra_evidence=template['extra_evidence'])
+        report = self.report(result, result='pending')
         report['reviewer']['agent_id'] = 'different-synthetic-reviewer'
         with self.assertRaisesRegex(ValueError, '原复核代理'):
             api.review(self.root, 'head', report)

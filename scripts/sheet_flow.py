@@ -77,6 +77,9 @@ def start(root, source_directory, destination=None, destination_user_quote=None)
             'input_file': str(root / '制作记录/阶段输入/首次准备.json'),
             'submit_command': submit_command('prepare', root, 'head', root / '制作记录/阶段输入/首次准备.json'),
             'read_now': ['references/material-selection.md', 'references/production-api.md#prepare'],
+            'instruction': '首次生图前在本次选材中核对穿戴位置、露肤范围、后片/帽兜、叠层与小饰件；'
+                           '小部件或连接在全图不清楚时现在看必要原生局部，将事实写入观察、用途和饰品汇总。'
+                           '不等背面制作时才补查已有后方素材，不增加一轮代理验收。',
             'do_not_read_yet': ['references/production-delivery-api.md', 'later-stage references'],
             'source_access': 'forbidden_during_production'}
 
@@ -96,17 +99,36 @@ def validate_materials(materials, sources):
     validate(materials, sources)
 
 
-def plan_signature(flow, role):
-    return fingerprint({'character': flow['character'],
-        'uses': [{'source_id': m['source_id'], 'views': m['views'], 'use': u}
+def plan_semantics(flow, role):
+    return {'character': {k: flow['character'][k] for k in ('appearance', 'age_years') } |
+                        ({'height_cm': flow['character']['height_cm']} if role != 'head' else {}),
+        'uses': [{'source_id': m['source_id'], 'views': m['views'],
+                  'use': {k: v for k, v in use.items() if k != 'stages'}}
                  for m in flow['materials'] if m['decision'] != 'exclude'
-                 for u in m['uses'] if role in u['stages']],
+                 for use in m['uses'] if role in use['stages']],
         'accessories': [{k: a[k] for k in ('id', 'name', 'carrier', 'location')} |
-                       {'stage': a['stages'][role]} for a in flow['accessory_visibility']]})
+                       {'stage': {k: v for k, v in a['stages'][role].items() if k != 'reason'}}
+                       for a in flow['accessory_visibility']]}
+
+
+def plan_signature(flow, role):
+    return fingerprint(plan_semantics(flow, role))
+
+
+def plan_changed(previous, current, role):
+    """A newly catalogued hidden detail cannot rewind already reviewed views."""
+    before, after = plan_semantics(previous, role), plan_semantics(current, role)
+    before_ids = {a['id'] for a in before['accessories']}
+    after_ids = {a['id'] for a in after['accessories']}
+    hidden = {'not_visible', 'out_of_frame'}
+    for payload, other_ids in ((before, after_ids), (after, before_ids)):
+        payload['accessories'] = sorted((a for a in payload['accessories']
+            if a['id'] in other_ids or a['stage']['visibility'] not in hidden), key=lambda a: a['id'])
+    return fingerprint(before) != fingerprint(after)
 
 
 def invalidate_changed_plan(root, flow, staged, values):
-    changed = {r for r in ROLES if r in flow['stages'] and plan_signature(flow, r) != plan_signature(staged, r)}
+    changed = {r for r in ROLES if r in flow['stages'] and plan_changed(flow, staged, r)}
     affected = [r for r in ROLES if r in flow['stages'] and
                 (r in changed or any(up in changed for up in workflow.DEPENDENCIES[r]))]
     configurations = {}
@@ -143,14 +165,23 @@ def update_plan(root, role, config, input_path=None):
     affected, configurations = invalidate_changed_plan(root, flow, staged, values)
     workflow.save_all(root, values)
     save(root, staged, values)
+    if not affected and role in staged['stages']:
+        return dict(advance(root, role, staged, values), plan_saved=True,
+                    affected_prepared_stages=[], prepare_config_files={})
     next_role = affected[0] if affected else role
-    return {'next_action': 'prepare', 'stage': next_role, 'plan_saved': True,
+    result = {'next_action': 'prepare', 'stage': next_role, 'plan_saved': True,
             'affected_prepared_stages': affected, 'prepare_config_files': configurations,
             **({'config_file': configurations[next_role],
                 'submit_command': submit_command('prepare', root, next_role, configurations[next_role])}
                if next_role in configurations else {}),
-            'instruction': '计划已保存；按最早受影响阶段重新prepare，后续依次处理。无已准备阶段受影响时，'
+            'instruction': '计划已保存；只重新prepare实际受影响阶段及其已准备下游，无关阶段保留图片、批准与选优。'
+                           '新增仅在后方可见的细节不得从特写/正面重走或重新追加候选。无已准备阶段受影响时，'
                            '原样重试当前阶段prepare。update-plan不调用生图、不重置次数、不恢复视觉批准；prompt不在此命令应用。'}
+    if next_role in ('back', 'left') and staged.get('front_structure'):
+        from spatial_plan import valid, action
+        if not valid(root, staged, values):
+            result.update(action(root, staged, values))
+    return result
 
 
 def resolve_prompt(root, role, spec, flow, values):
@@ -318,6 +349,12 @@ def targets_from_prompt(role, spec, keys):
 def prepare(root, role, config, input_path=None):
     strict(config, PREPARE_FIELDS, {'prompt'})
     flow = read_flow(root)
+    pending = [r for r in flow['requests'].values() if r['state'] == 'awaiting_result']
+    if pending and all(r['stage'] == role for r in pending):
+        from tool_execution import recovery_action
+        recovery = recovery_action(root, role, pending, submit_command)
+        if recovery:
+            return recovery
     require(not any(r['state'] == 'awaiting_result' for r in flow['requests'].values()), '先登记已发出的调用结果，不重新准备')
     staged = copy.deepcopy(flow)
     if flow['character'] is None:
@@ -335,10 +372,19 @@ def prepare(root, role, config, input_path=None):
         validate(config['accessory_visibility'], staged['materials'])
         staged['accessory_visibility'] = config['accessory_visibility']
     values = workflow.load_all(root)
-    affected = [r for r in ROLES if r in flow['stages'] and plan_signature(flow, r) != plan_signature(staged, r)]
+    affected = [r for r in ROLES if r in flow['stages'] and plan_changed(flow, staged, r)]
     require(not affected or ROLES.index(role) <= ROLES.index(affected[0]),
             '共享选材变化影响上游目标：先update-plan，由返回的最早阶段重新prepare；不能绕过上游批准失效')
     invalidate_changed_plan(root, flow, staged, values)
+    if role in flow['stages'] and not values[1]['stages'][role].get('plan_requires_prepare'):
+        previous = read(root / flow['stages'][role]['input_file'])
+        shared = {'character', 'materials', 'accessory_visibility'}
+        if ({k: v for k, v in previous.items() if k not in shared} ==
+                {k: v for k, v in config.items() if k not in shared} and
+                workflow.status(root, role, values)['next_action'] == 'continue'):
+            workflow.save_all(root, values)
+            save(root, staged, values)
+            return advance(root, role, staged, values)
     from accessory_plan import refresh_prepared
     refresh_prepared(root, role, flow, staged, values)
     from material_plan import inject
@@ -451,6 +497,9 @@ def reserve(root, role, count, flow, values):
     workflow.write(requests_file(root, role, requests), {'tool_call_count': count,
         'requests': [{'request_id': r['request_id'], 'tool': r['tool'], 'recipe_sha256': r['recipe_sha256'],
                       'arguments': tool_arguments(root, recipe)} for r in requests]})
+    from tool_execution import execution_code, paths
+    execution_code(root, role, requests, requests_file(root, role, requests),
+        submit_command('capture', root, role, paths(root, role, requests)['returned']), create=True)
     return requests
 
 
@@ -523,8 +572,18 @@ def advance(root, role, flow=None, values=None, retry=False, mutate=True):
     if pending:
         recipe = values[2]['stages'][role]['recipe']
         require(all(r['recipe_sha256'] == workflow.recipe_binding(recipe) for r in pending), '待执行请求的配方已变化')
+        from tool_execution import recovery_action, execution_code, paths as receipt_paths
+        recovery = recovery_action(root, role, pending, submit_command)
+        if recovery:
+            return recovery
         arguments = tool_arguments(root, recipe)
         count = len(pending)
+        code = execution_code(root, role, pending, requests_file(root, role, pending),
+            submit_command('capture', root, role, receipt_paths(root, role, pending)['returned']))
+        if recipe['tool'] == 'image_gen.imagegen' and code is None:
+            return {'next_action': 'restore_execution', 'stage': role, 'tool_call_count': 0,
+                    'submit_command': invocation(['restore-execution', '--root', str(root), '--stage', role]),
+                    'instruction': '固定执行包缺失；原样执行恢复命令，仅补执行包，不预留新请求、不调用生图。'}
         batch_instruction = ('本批仅一项，只调用一次；返回后直接receive，不再调用生图。'
                              if count == 1 else
                              f'本批{count}项同批并行发出，每项只调用一次；全部返回后一次receive，中间不看图、不登记单张、不排序。')
@@ -534,9 +593,14 @@ def advance(root, role, flow=None, values=None, retry=False, mutate=True):
                 'requests_file': str(requests_file(root, role, pending)),
                 'receipt_config_file': str(receipt_config(root, role, pending)),
                 'submit_command': submit_command('receive', root, role, receipt_config(root, role, pending)),
+                'execution_code': code,
+                'capture_submit_command': submit_command('capture', root, role, receipt_config(root, role, pending)),
                 'reference_coverage': flow['stages'][role]['reference_coverage'],
                 'reference_packing': flow['stages'][role]['reference_packing'],
-                'instruction': '只执行本批requests，原样使用arguments；已有真实工具返回则直接receive，恢复时不重发。'
+                'instruction': '有execution_code时直接用functions.exec执行返回代码；固定包装读取冻结参数、'
+                               '先store完整工具返回并缓存原始文本/路径回执，再显示预览。执行返回receive后直接登记。'
+                               '其他工具按requests原样调用，当前上下文保存完整返回，先capture缓存整批回执再receive。'
+                               '只执行本批requests，原样使用arguments；已有真实工具返回则直接receive，恢复时不重发。'
                                '工具已成功返回但预览/显示或receive失败，不代表生成失败，不允许重调生图；保留原结果修复回执。'
                                '不要截断打印完整返回值而丢掉路径；原始文本回执或output_hint等路径字段完整保留，不打印base64。'
                                '不调用测试、探测、占位或无关提示词，不为确认工具是否可用额外生图。' + batch_instruction +
@@ -610,6 +674,19 @@ def advance(root, role, flow=None, values=None, retry=False, mutate=True):
                                                 'references': references, 'critical_constraints': []}})
             if path.exists():
                 status.update(config_file=str(path), submit_command=submit_command('prepare', root, following, path))
+    if action in ('revise_input_or_repair', 'stop_and_diagnose'):
+        latest = choice['attempts'][-1]
+        review = choice['reviews'].get(latest['id'], {})
+        goals = {g['id']: g for g in values[0]['checks'][role]}
+        status['repair_basis'] = [{k: copy.deepcopy(item[k]) for k in
+            ('id', 'issue_key', 'reference_observation', 'candidate_observation', 'comparison_basis', 'evidence') if k in item}
+            | {'target': goals[item['id']]['target']} for item in review.get('checks', []) if item['result'] == 'fail']
+        if not status['repair_basis']:
+            status['repair_basis'] = [copy.deepcopy(latest.get('self_check', {}))]
+        status['instruction'] = ('先读repair_basis中的原图事实、候选表现与比较依据，修复文字必须指向正确结果；'
+                                 '不得只凭失败项名称猜方向。已看清的证据不重看；确有矛盾才补看对应原图。'
+                                 '若错的是制作目标/记录，只改相关计划，不为补记录重生无关图片或重走追加选优。'
+                                 '所有修复继续遵守轻微裁切和第二轮饰品放宽尺度。')
     return status
 
 
@@ -632,6 +709,21 @@ def comparisons_for_stage(stage_config, goals):
     return groups(goals)
 
 
+def capture(root, role, config):
+    strict(config, {'calls'}, {'calls'})
+    for call in config['calls']:
+        strict(call, {'request_id', 'tool_call_id', 'output', 'error', 'result'}, {'request_id'})
+    flow = read_flow(root)
+    pending = [r for r in flow['requests'].values() if r['stage'] == role and r['state'] == 'awaiting_result']
+    require(bool(pending), '本阶段没有待登记请求，不重调生图')
+    from tool_execution import cache_receipts
+    cached = cache_receipts(root, role, pending, config)
+    return {'next_action': 'receive', 'stage': role, 'tool_call_count': 0,
+            'receipt_cached': True, 'receipt_config_file': str(cached),
+            'submit_command': submit_command('receive', root, role, cached),
+            'instruction': '整批真实回执已缓存；直接receive。路径解析或预览失败只修登记，不把成功换成工具失败，不再生图。'}
+
+
 def receive(root, role, config):
     strict(config, {'calls'}, {'calls'})
     flow, values = read_flow(root), workflow.load_all(root)
@@ -643,6 +735,8 @@ def receive(root, role, config):
     from tool_receipts import normalize, archive_output
     for c in calls:
         strict(c, {'request_id', 'tool_call_id', 'output', 'error', 'result'}, {'request_id'})
+    from tool_execution import check_cached_receipts
+    check_cached_receipts(root, role, list(pending.values()), calls)
     calls = [normalize(root, c) for c in calls]
     lookup = {c['request_id']: c for c in calls}
     actual_ids = [c['tool_call_id'] for c in calls if c['tool_call_id']]
@@ -702,12 +796,9 @@ def check_report(root, role, config):
     """Read-only field/evidence preflight for the reviewer before its final handoff."""
     require(isinstance(config, dict) and config.get('kind', 'visual') == 'visual',
             'check-report只接收visual报告')
-    from review_report import report_errors, production_input_errors, production_evidence_errors
+    from review_report import report_errors, production_input_errors, production_evidence_errors, preflight_result
     errors = production_input_errors(config) + production_evidence_errors(root, role, config, read_flow(root)) + report_errors(root, role, config, workflow.load_all(root))
-    return {'next_action': 'correct_report_fields' if errors else 'report_ready',
-            'field_errors': errors, 'visual_approval_recorded': False,
-            'instruction': '按实际查看修正列出的字段；未看的证据须实际查看后才能填写。此命令只读，不记录视觉通过。' if errors
-                           else '报告字段与引用就绪，一次向主模型返回最终报告路径和结论。主模型再执行review登记。'}
+    return preflight_result(config, errors)
 
 
 def review(root, role, config):
@@ -720,15 +811,15 @@ def review(root, role, config):
         if expected and config.get('reviewer', {}).get('mode') == 'subagent':
             require(config['reviewer'].get('agent_id') == expected or bool(config.get('reviewer_replacement_reason')),
                     '补证交回原复核代理；不能复用时记录reviewer_replacement_reason')
-    from review_report import report_errors, production_input_errors, production_evidence_errors
+    from review_report import report_errors, production_input_errors, production_evidence_errors, preflight_result
     errors = production_input_errors(config) + production_evidence_errors(root, role, config, flow) + report_errors(root, role, config, values)
     if errors:
-        return {'next_action': 'correct_report_fields', 'field_errors': errors,
-                'instruction': '只补列出的实际观察或记录字段，不生图、不改验收结论。'}
+        return preflight_result(config, errors)
     workflow.record_review(root, role, config, values)
     workflow.save_all(root, values)
     save(root, flow, values)
-    return advance(root, role, flow, values)
+    return dict(advance(root, role, flow, values), report_validation='valid', visual_state_changed=True,
+                registered_reviewer=copy.deepcopy(config['reviewer']), registered_call_id=config['call_id'])
 
 
 def rank(root, role, config):
@@ -754,17 +845,36 @@ def rank(root, role, config):
     return advance(root, role, flow, values)
 
 
+def public_action(result):
+    """CLI transports the fixed runner once; full frozen arguments stay in the batch file."""
+    result = copy.deepcopy(result)
+    if result.get('execution_code'):
+        result['requests'] = [{k: v for k, v in r.items() if k != 'arguments'} for r in result['requests']]
+        result['execution_file'] = str(Path(result['requests_file']).with_suffix('.exec.json'))
+        result['reference_coverage'] = [{k: v for k, v in row.items() if k != 'target'}
+                                        for row in result.get('reference_coverage', [])]
+        result['reference_packing'] = {k: v for k, v in result.get('reference_packing', {}).items()
+                                       if k in ('capacity', 'before_count', 'after_count')}
+        result['instruction'] = ('原样执行execution_code；它加载并核对本批固定执行包，再按requests_file并行调用完整参数，'
+                                 '先保存整批回执、capture，最后显示预览。不要阅读执行包或改写包装器。'
+                                 '返回后直接receive。已有回执只恢复登记；缺失回执不能冒充工具失败。'
+                                 '执行代码读取失败或输出截断时恢复同一执行包，不自行补抄参数、不发部分批次。')
+    return result
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('start', 'prepare', 'update-plan', 'record-structure', 'receive', 'self-check', 'check-report', 'review', 'supplement', 'rank', 'deliver', 'status'))
+    parser.add_argument('command', choices=('start', 'prepare', 'update-plan', 'record-structure', 'capture', 'receive', 'self-check', 'check-report', 'read-review', 'restore-execution', 'review', 'supplement', 'rank', 'deliver', 'status'))
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--stage', choices=ROLES, default='head')
     parser.add_argument('--sources', type=Path)
     parser.add_argument('--destination', type=Path, help='Only at start, when explicitly specified by the user')
     parser.add_argument('--destination-user-quote', help='The user\'s exact destination request, only at start')
+    parser.add_argument('--manifest', type=Path, help='Exact reading_manifest_file from the reviewer handoff')
+    parser.add_argument('--page', type=int, default=1)
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--config', type=Path)
     group.add_argument('--json')
@@ -778,8 +888,22 @@ def main():
         if args.command == 'start':
             require(args.sources is not None, 'start需要--sources')
             result = start(root, args.sources, args.destination, args.destination_user_quote)
+        elif args.command == 'read-review':
+            from review_reading import page
+            require(args.manifest is not None, 'read-review需要交接给定的--manifest')
+            result = page(root, args.manifest, args.page)
         elif args.command == 'status':
             result = advance(root, args.stage, mutate=False)
+        elif args.command == 'restore-execution':
+            flow, values = read_flow(root), workflow.load_all(root)
+            pending = [r for r in flow['requests'].values() if r['stage'] == args.stage and r['state'] == 'awaiting_result']
+            require(bool(pending), '没有待执行的固定批次')
+            recipe = values[2]['stages'][args.stage]['recipe']
+            require(all(r['recipe_sha256'] == workflow.recipe_binding(recipe) for r in pending), '待执行配方已变化')
+            from tool_execution import execution_code, paths
+            execution_code(root, args.stage, pending, requests_file(root, args.stage, pending),
+                submit_command('capture', root, args.stage, paths(root, args.stage, pending)['returned']), create=True)
+            result = advance(root, args.stage, flow, values, mutate=False)
         elif args.command == 'deliver':
             from production_delivery import deliver
             result = deliver(root, config or {})
@@ -796,9 +920,9 @@ def main():
             if args.command in ('prepare', 'update-plan'):
                 result = {'prepare': prepare, 'update-plan': update_plan}[args.command](root, args.stage, config, config_path)
             else:
-                result = {'receive': receive, 'self-check': simple_check,
+                result = {'capture': capture, 'receive': receive, 'self-check': simple_check,
                           'check-report': check_report, 'review': review, 'rank': rank}[args.command](root, args.stage, config)
-        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+        print(json.dumps(public_action(result), ensure_ascii=False, allow_nan=False))
         return 2 if result.get('field_errors') or result.get('errors') else 0
     except PermissionError as exc:
         retry_args = [args.command, '--root', str(root), '--stage', args.stage]
@@ -808,6 +932,8 @@ def main():
             retry_args += ['--json', args.json]
         if args.sources is not None:
             retry_args += ['--sources', str(args.sources.resolve())]
+        if args.manifest is not None:
+            retry_args += ['--manifest', str(args.manifest), '--page', str(args.page)]
         if args.destination is not None:
             retry_args += ['--destination', str(args.destination.resolve()), '--destination-user-quote', args.destination_user_quote]
         print(json.dumps({'next_action': 'request_file_access', 'errors': [str(exc)], 'file': exc.filename,
@@ -818,6 +944,13 @@ def main():
                           'script_source_required': False}, ensure_ascii=False))
         return 2
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError) as exc:
+        if args.command in ('capture', 'receive'):
+            print(json.dumps({'next_action': 'correct_receipt_fields', 'errors': [str(exc)],
+                              'receipt_validation': 'invalid', 'tool_failure_recorded': False,
+                              'instruction': '保留当前请求和真实工具返回，只修回执/登记字段；'
+                                             '成功返回的显示、路径解析或缓存失败不能写成工具error，不再生图。',
+                              'script_source_required': False}, ensure_ascii=False))
+            return 2
         details = {}
         if hasattr(exc, 'field_errors'):
             details['field_errors'] = exc.field_errors

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "uiRevision": 48,
+  "uiRevision": 49,
   "layoutVersion": 2,
   "files": [
     {
       "path": "编辑画布.html",
-      "size": 199482,
-      "sha256": "4c2971bb20c2e7e90e461903c62cf0fc169aae89b541ae26ec767835ae4f7864"
+      "size": 199595,
+      "sha256": "28bf232b85fe7b2beb6d3bdb98ac3a115b33c4321e7ea4fa5a5bd2c0088ffb88"
     },
     {
       "path": "网页资源/后端服务.cmd",
